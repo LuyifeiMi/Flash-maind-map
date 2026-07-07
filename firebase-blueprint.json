@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "FlashMapData": {
+      "title": "FlashMapData",
+      "description": "Stores the user's mind map data including nodes and edges.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The user ID of the owner."
+        },
+        "nodes": {
+          "type": "string",
+          "description": "JSON stringified array of nodes to bypass Firestore nested array/object limitations."
+        },
+        "edges": {
+          "type": "string",
+          "description": "JSON stringified array of edges to bypass Firestore nested array/object limitations."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the last update."
+        }
+      },
+      "required": ["uid", "nodes", "edges", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/mapData/current": {
+      "schema": { "$ref": "#/entities/FlashMapData" },
+      "description": "The user's current mind map data."
+    }
+  }
+}
