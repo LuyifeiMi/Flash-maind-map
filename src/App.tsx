@@ -3,92 +3,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  ReactFlow, 
-  Controls, 
-  Background, 
-  useNodesState, 
+import {
+  ReactFlow,
+  Controls,
+  Background,
+  useNodesState,
   useEdgesState,
   useReactFlow,
   addEdge,
   ConnectionLineType,
   Panel,
-  Node,
   Edge,
   MiniMap,
   MarkerType
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { GoogleGenAI, Type } from '@google/genai';
-import { Brain, Sparkles, Loader2, BookOpen, ChevronRight, Edit3, Book, Network, Trash2, PlusCircle, BrainCircuit, Download, Upload, LogIn, LogOut, Folder, FileText, Plus, PanelLeftClose, PanelLeftOpen, Check, X, RotateCw, Undo2, Redo2, Settings, Link, SquareDashed, Braces } from 'lucide-react';
+import type { FlashNode as Node, FlashNodeData, ReviewResult, MapItem } from './types';
+import { AICancelledError, validateCards } from './lib/ai';
+import { useAI } from './hooks/useAI';
+import { AIKeyModal } from './components/AIKeyModal';
+import { getDescendants, isTreeEdge, canConnect, applyVisibility, parseGraph } from './lib/graph';
+import { isDue, isReviewable } from './lib/review';
+import { useMapStorage } from './hooks/useMapStorage';
+import { useDesktopImport } from './hooks/useDesktopImport';
+import { Brain, Sparkles, Loader2, BookOpen, ChevronRight, Edit3, Book, Network, Trash2, PlusCircle, BrainCircuit, Download, Upload, KeyRound, Folder, FileText, Plus, PanelLeftClose, PanelLeftOpen, Check, X, RotateCw, Undo2, Redo2, Settings, Link, SquareDashed, Braces } from 'lucide-react';
 
-import { auth, db } from './firebase';
-import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { doc, onSnapshot, setDoc, getDocFromServer, collection, query, deleteDoc } from 'firebase/firestore';
 
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email || undefined,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId || undefined,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
-
-async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if(error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration. ");
-    }
-  }
-}
-testConnection();
 
 import { CustomNode } from './components/CustomNode';
 import { FlashcardModal } from './components/FlashcardModal';
@@ -109,6 +51,7 @@ interface FlashcardData {
   label: string;
   question: string;
   answer: string;
+  sourceExcerpt?: string;
 }
 
 const initialNodes: Node[] = [
@@ -116,11 +59,12 @@ const initialNodes: Node[] = [
     id: 'intro',
     type: 'custom',
     position: { x: 0, y: 0 },
-    data: { 
-      label: 'Welcome to FlashMap', 
-      question: 'How do I use this tool?', 
-      answer: 'FlashMap is an AI-powered mind mapping and flashcard tool. It helps you visualize knowledge and study effectively.',
+    data: {
+      label: '欢迎使用 FlashMap',
+      question: 'FlashMap 可以怎样帮助学习？',
+      answer: '先用导图整理知识，再用闪卡主动回忆。复习状态会显示回导图，帮助你找到薄弱知识点。',
       isRoot: true,
+      reviewEnabled: false,
       depth: 0
     },
   },
@@ -129,9 +73,9 @@ const initialNodes: Node[] = [
     type: 'custom',
     position: { x: 300, y: -100 },
     data: {
-      label: 'Create Nodes',
-      question: 'How do I create new nodes manually?',
-      answer: 'In Edit mode, press Tab to add a child, Enter to add a sibling, or Shift+Tab to add an independent node. You can also use the AI generation panel.',
+      label: '创建节点',
+      question: '如何手动创建知识节点？',
+      answer: '进入编辑模式后，Tab 添加子节点，Enter 添加同级节点，Shift+Tab 添加独立节点。双击节点可以编辑题目、答案和复习开关。',
       isRoot: false,
       depth: 1
     }
@@ -141,9 +85,9 @@ const initialNodes: Node[] = [
     type: 'custom',
     position: { x: 300, y: 100 },
     data: {
-      label: 'AI Features',
-      question: 'How do I use AI?',
-      answer: 'Enter your Gemini API key in Settings. Then use the left sidebar to generate new trees or expand existing selected nodes with AI.',
+      label: 'AI 学习助手',
+      question: '如何利用 AI 整理学习资料？',
+      answer: '首次使用 AI 会提示输入 Gemini Key，密钥只交给本机服务。使用左侧面板生成导图，或选择节点扩展知识。不要在学习内容中填写密钥。',
       isRoot: false,
       depth: 1
     }
@@ -154,85 +98,44 @@ const initialEdges: Edge[] = [
   { id: 'e-guide-1', source: 'intro', target: 'guide-create', type: 'smoothstep', animated: true, style: { stroke: '#818cf8', strokeWidth: 2 } },
   { id: 'e-guide-2', source: 'intro', target: 'guide-ai', type: 'smoothstep', animated: true, style: { stroke: '#818cf8', strokeWidth: 2 } }
 ];
+const beginnerGraph = getLayoutedElements(initialNodes, initialEdges);
 
-const loadInitialNodes = () => {
-  const saved = localStorage.getItem('flashmap-nodes');
-  return saved ? JSON.parse(saved) : initialNodes;
-};
-
-const loadInitialEdges = () => {
-  const saved = localStorage.getItem('flashmap-edges');
-  return saved ? JSON.parse(saved) : initialEdges;
-};
-
-const isDescendant = (potentialDescendantId: string, ancestorId: string, currentEdges: Edge[]): boolean => {
-  if (potentialDescendantId === ancestorId) return true;
-  const children = currentEdges.filter(e => e.source === ancestorId).map(e => e.target);
-  for (const childId of children) {
-    if (isDescendant(potentialDescendantId, childId, currentEdges)) {
-      return true;
-    }
-  }
-  return false;
-};
-
-const getDescendants = (nodeId: string, currentEdges: Edge[]): string[] => {
-  const children = currentEdges.filter(e => e.source === nodeId).map(e => e.target);
-  let descendants = [...children];
-  for (const childId of children) {
-    descendants = descendants.concat(getDescendants(childId, currentEdges));
-  }
-  return descendants;
-};
-
-interface MapItem {
-  id: string;
-  title: string;
-  nodes: string;
-  edges: string;
-  updatedAt: string;
-}
+const isDescendant = (descendantId: string, ancestorId: string, edges: Edge[]) => descendantId === ancestorId || getDescendants(ancestorId, edges).includes(descendantId);
 
 export default function App() {
-  const { screenToFlowPosition, getViewport } = useReactFlow();
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-  
-  const [user, setUser] = useState<User | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const { screenToFlowPosition, getViewport, fitView } = useReactFlow();
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(beginnerGraph.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(beginnerGraph.edges);
 
-  const [maps, setMaps] = useState<MapItem[]>([]);
-  const [currentMapId, setCurrentMapId] = useState<string>('');
-  const [mapTitle, setMapTitle] = useState('Untitled Map');
-  
+
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(timer); }, []);
   const [inputText, setInputText] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isExpanding, setIsExpanding] = useState(false);
-  
+
   const [newNodeTitle, setNewNodeTitle] = useState('');
   const [newNodeContent, setNewNodeContent] = useState('');
   const [isGeneratingNode, setIsGeneratingNode] = useState(false);
-  
+
   const [mode, setMode] = useState<'study' | 'edit' | 'review' | 'select-topic'>('study');
-  
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => window.innerWidth >= 768);
   const [showMiniMap, setShowMiniMap] = useState(() => {
-    const saved = localStorage.getItem('flashmap-show-minimap');
-    return saved ? JSON.parse(saved) : true;
+    try { return localStorage.getItem('flashmap-show-minimap') !== 'false'; } catch { return true; }
   });
 
   useEffect(() => {
-    localStorage.setItem('flashmap-show-minimap', JSON.stringify(showMiniMap));
+    try { localStorage.setItem('flashmap-show-minimap', JSON.stringify(showMiniMap)); } catch { /* Maps report storage failures separately. */ }
   }, [showMiniMap]);
 
 
   const [editingMapId, setEditingMapId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
-  
-  const [selectedNodeData, setSelectedNodeData] = useState<any>(null);
+
+  const [selectedNodeData, setSelectedNodeData] = useState<FlashNodeData | null>(null);
   const [isFlashcardOpen, setIsFlashcardOpen] = useState(false);
-  
+
   const [editingNode, setEditingNode] = useState<Node | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
 
@@ -269,7 +172,7 @@ export default function App() {
         const container = toolbarRef.current.parentElement;
         const containerRect = container.getBoundingClientRect();
         const toolbarRect = toolbarRef.current.getBoundingClientRect();
-        
+
         if (toolbarRect.width > 0) {
           setToolbarPos({
             x: (containerRect.width - toolbarRect.width) / 2,
@@ -311,7 +214,7 @@ export default function App() {
         const paddingX = 24;
         const paddingBottom = 24;
         const paddingTop = 80; // Extra padding at top to avoid sidebar toggle and mode switcher
-        
+
         const maxX = containerRect.width - toolbarRect.width - paddingX;
         const maxY = containerRect.height - toolbarRect.height - paddingBottom;
 
@@ -350,7 +253,7 @@ export default function App() {
     const paddingX = 24;
     const paddingBottom = 24;
     const paddingTop = 80; // Extra padding at top to avoid sidebar toggle and mode switcher
-    
+
     const w = containerRect.width;
     const h = containerRect.height;
 
@@ -385,7 +288,6 @@ export default function App() {
 
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
-  const isRemoteUpdateRef = useRef(false);
 
   const dragStateRef = useRef<{
     draggedNodeId: string;
@@ -406,7 +308,7 @@ export default function App() {
           return p;
         }
       }
-      return [...p, currentState];
+      return [...p.slice(-49), currentState];
     });
     setFuture([]);
   }, []);
@@ -430,7 +332,7 @@ export default function App() {
   }, [future, setNodes, setEdges]);
 
   const handleExport = () => {
-    const data = { nodes, edges };
+    const data = { schemaVersion: 2, title: mapTitle, nodes, edges };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -445,6 +347,7 @@ export default function App() {
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { alert('导图文件不能超过 10 MB'); return; }
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -452,14 +355,15 @@ export default function App() {
         const content = event.target?.result as string;
         const data = JSON.parse(content);
         if (data.nodes && data.edges) {
+          const graph = parseGraph(data);
           takeSnapshot();
-          setNodes(data.nodes);
-          setEdges(data.edges);
+          setNodes(graph.nodes);
+          setEdges(graph.edges);
         } else {
           alert('Invalid file format. Please upload a valid FlashMap export file.');
         }
       } catch (error) {
-        console.error('Failed to parse file:', error);
+        console.error('操作失败，请重试。');
         alert('Failed to parse file. Please ensure it is a valid JSON file.');
       }
     };
@@ -469,361 +373,41 @@ export default function App() {
     }
   };
 
-  // Auth State Listener
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setIsAuthReady(true);
+  const resetHistory = useCallback(() => { setPast([]); setFuture([]); }, []);
+  const { maps, currentMapId, mapTitle, saveStatus, storageError,
+    switchMap, createMap: handleCreateMap, importPrivateMap, renameMap, deleteMaps, retrySave } = useMapStorage({
+      nodes, edges, setNodes, setEdges, initialNodes: beginnerGraph.nodes, initialEdges: beginnerGraph.edges, resetHistory,
     });
-    return () => unsubscribe();
-  }, []);
+  const desktopImportMessage = useDesktopImport(importPrivateMap);
+  useLayoutEffect(() => { nodesRef.current = nodes; edgesRef.current = edges; }, [nodes, edges]);
+  const generationEpoch = useRef(0);
+  useLayoutEffect(() => {
+    generationEpoch.current++;
+    setIsPreviewModalOpen(false); setPendingNodes([]); setPendingEdges([]);
+    setIsEditModalOpen(false); setIsFlashcardOpen(false); setContextMenu(null); setReviewSubtreeId(null); setMode('study');
+    setPreviewLayoutNodes([]); setPreviewLayoutEdges([]);
+    const timer = setTimeout(() => { void fitView({ duration: 300, padding: 0.2, maxZoom: 1 }); }, 80);
+    return () => clearTimeout(timer);
+  }, [currentMapId, fitView]);
 
-  const currentMapIdRef = useRef(currentMapId);
-  useEffect(() => { currentMapIdRef.current = currentMapId; }, [currentMapId]);
 
-  const switchMap = useCallback((mapId: string, mapObj?: MapItem) => {
-    const map = mapObj || maps.find(m => m.id === mapId);
-    if (map) {
-      setCurrentMapId(mapId);
-      setMapTitle(map.title);
-      isRemoteUpdateRef.current = true;
-      try {
-        setPast([]);
-        setFuture([]);
-        setNodes(JSON.parse(map.nodes));
-        setEdges(JSON.parse(map.edges));
-      } catch (e) {
-        console.error("Failed to parse map data", e);
-      }
-      setTimeout(() => { isRemoteUpdateRef.current = false; }, 100);
-      if (!auth.currentUser) {
-        localStorage.setItem('flashmap-current-id', mapId);
-      }
-    }
-  }, [maps, setNodes, setEdges]);
+  const handleRenameMap = (id: string, title: string) => { renameMap(id, title); setEditingMapId(null); };
+  const handleDeleteMap = (id: string, e: React.MouseEvent) => { e.stopPropagation(); setMapToDelete(id); };
+  const confirmDeleteMap = async () => { if (mapToDelete && await deleteMaps(mapToDelete)) setMapToDelete(null); };
+  const handleClearAllMaps = () => setMapToDelete('ALL');
 
-  const hasLoadedLocalRef = useRef(false);
-
-  // Initial Local Load
-  useEffect(() => {
-    if (!isAuthReady) return;
-    if (user) {
-      hasLoadedLocalRef.current = false;
-      return;
-    }
-    if (hasLoadedLocalRef.current) return;
-
-    const savedMaps = localStorage.getItem('flashmap-maps');
-    let loadedMaps: MapItem[] = [];
-    if (savedMaps) {
-      loadedMaps = JSON.parse(savedMaps);
-    } else {
-      const oldNodes = localStorage.getItem('flashmap-nodes');
-      const oldEdges = localStorage.getItem('flashmap-edges');
-      loadedMaps = [{
-        id: crypto.randomUUID(),
-        title: oldNodes ? 'Migrated Map' : 'Beginner\'s Guide',
-        nodes: oldNodes || JSON.stringify(initialNodes),
-        edges: oldEdges || JSON.stringify(initialEdges),
-        updatedAt: new Date().toISOString()
-      }];
-    }
-    setMaps(loadedMaps);
-    const savedId = localStorage.getItem('flashmap-current-id');
-    const mapToLoad = loadedMaps.find(m => m.id === savedId) || loadedMaps[0];
-    
-    setCurrentMapId(mapToLoad.id);
-    setMapTitle(mapToLoad.title);
-    isRemoteUpdateRef.current = true;
-    try {
-      setPast([]);
-      setFuture([]);
-      setNodes(JSON.parse(mapToLoad.nodes));
-      setEdges(JSON.parse(mapToLoad.edges));
-    } catch (e) {
-      console.error("Failed to parse map data", e);
-    }
-    setTimeout(() => { isRemoteUpdateRef.current = false; }, 100);
-    localStorage.setItem('flashmap-current-id', mapToLoad.id);
-    
-    hasLoadedLocalRef.current = true;
-  }, [user, isAuthReady, setNodes, setEdges]);
-
-  // One-time migration to apply new layout spacing
-  useEffect(() => {
-    if (nodes.length > 0 && !localStorage.getItem('flashmap-layout-migrated-v6')) {
-      if (nodes.length > 1 && edges.length > 0) {
-        const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(nodes, edges, 'LR');
-        setNodes(layoutedNodes);
-        setEdges(layoutedEdges);
-      }
-      localStorage.setItem('flashmap-layout-migrated-v6', 'true');
-    }
-  }, [nodes, edges, setNodes, setEdges]);
-  useEffect(() => {
-    if (!isAuthReady || !user) return;
-
-    const q = query(collection(db, 'users', user.uid, 'maps'));
-    const unsubscribe = onSnapshot(q, async (snapshot) => {
-      const loadedMaps: MapItem[] = [];
-      snapshot.forEach(document => {
-        loadedMaps.push(document.data() as MapItem);
-      });
-      loadedMaps.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-
-      if (loadedMaps.length === 0) {
-        // Try to migrate from old mapData/current
-        try {
-          const oldDoc = await getDocFromServer(doc(db, 'users', user.uid, 'mapData', 'current'));
-          const newId = crypto.randomUUID();
-          const defaultMap = {
-            id: newId,
-            title: oldDoc.exists() ? 'Migrated Map' : 'Beginner\'s Guide',
-            nodes: oldDoc.exists() ? oldDoc.data().nodes : JSON.stringify(initialNodes),
-            edges: oldDoc.exists() ? oldDoc.data().edges : JSON.stringify(initialEdges),
-            updatedAt: new Date().toISOString(),
-            uid: user.uid
-          };
-          await setDoc(doc(db, 'users', user.uid, 'maps', newId), defaultMap);
-        } catch (e) {
-          console.error("Migration failed", e);
-        }
-        return;
-      }
-
-      setMaps(loadedMaps);
-
-      const activeId = currentMapIdRef.current;
-      const activeMap = loadedMaps.find(m => m.id === activeId);
-      
-      if (!activeId || !activeMap) {
-        const mapToLoad = loadedMaps[0];
-        setCurrentMapId(mapToLoad.id);
-        setMapTitle(mapToLoad.title);
-        isRemoteUpdateRef.current = true;
-        try {
-          setPast([]);
-          setFuture([]);
-          setNodes(JSON.parse(mapToLoad.nodes));
-          setEdges(JSON.parse(mapToLoad.edges));
-        } catch(e) {}
-        setTimeout(() => { isRemoteUpdateRef.current = false; }, 100);
-      }
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/maps`);
-    });
-
-    return () => unsubscribe();
-  }, [user, isAuthReady, setNodes, setEdges]);
-
-  // Keep refs updated for keyboard shortcuts and save to Firestore
-  useEffect(() => {
-    nodesRef.current = nodes;
-    edgesRef.current = edges;
-    
-    if (!isAuthReady || !currentMapId) return;
-    if (isRemoteUpdateRef.current) return;
-
-    const save = async () => {
-      setIsSyncing(true);
-      const updatedMap: MapItem = {
-        id: currentMapId,
-        title: mapTitle,
-        nodes: JSON.stringify(nodes),
-        edges: JSON.stringify(edges),
-        updatedAt: new Date().toISOString()
-      };
-
-      if (user) {
-        try {
-          await setDoc(doc(db, 'users', user.uid, 'maps', currentMapId), {
-            ...updatedMap,
-            uid: user.uid
-          });
-        } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/maps/${currentMapId}`);
-        } finally {
-          setIsSyncing(false);
-        }
-      } else {
-        setMaps(prev => {
-          const newMaps = prev.map(m => m.id === currentMapId ? updatedMap : m);
-          if (!newMaps.find(m => m.id === currentMapId)) newMaps.push(updatedMap);
-          localStorage.setItem('flashmap-maps', JSON.stringify(newMaps));
-          localStorage.setItem('flashmap-current-id', currentMapId);
-          return newMaps;
-        });
-        setIsSyncing(false);
-      }
-    };
-    
-    const timeoutId = setTimeout(save, 1000);
-    return () => clearTimeout(timeoutId);
-  }, [nodes, edges, mapTitle, currentMapId, user, isAuthReady]);
-
-  const handleCreateMap = async () => {
-    const newId = crypto.randomUUID();
-    const newMap: MapItem = {
-      id: newId,
-      title: 'New Map',
-      nodes: JSON.stringify(initialNodes),
-      edges: JSON.stringify(initialEdges),
-      updatedAt: new Date().toISOString()
-    };
-    
-    if (user) {
-      await setDoc(doc(db, 'users', user.uid, 'maps', newId), { ...newMap, uid: user.uid });
-    } else {
-      const newMaps = [newMap, ...maps];
-      setMaps(newMaps);
-      localStorage.setItem('flashmap-maps', JSON.stringify(newMaps));
-    }
-    switchMap(newId, newMap);
-  };
-
-  const handleRenameMap = async (mapId: string, newTitle: string) => {
-    if (!newTitle.trim()) {
-      setEditingMapId(null);
-      return;
-    }
-    if (mapId === currentMapId) {
-      setMapTitle(newTitle);
-    } else {
-      const mapToUpdate = maps.find(m => m.id === mapId);
-      if (mapToUpdate) {
-        const updated = { ...mapToUpdate, title: newTitle, updatedAt: new Date().toISOString() };
-        if (user) {
-          await setDoc(doc(db, 'users', user.uid, 'maps', mapId), { ...updated, uid: user.uid });
-        } else {
-          setMaps(prev => {
-            const newMaps = prev.map(m => m.id === mapId ? updated : m);
-            localStorage.setItem('flashmap-maps', JSON.stringify(newMaps));
-            return newMaps;
-          });
-        }
-      }
-    }
-    setEditingMapId(null);
-  };
-
-  const handleDeleteMap = (mapId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setMapToDelete(mapId);
-  };
-
-  const confirmDeleteMap = async () => {
-    if (!mapToDelete) return;
-    const mapId = mapToDelete;
-    
-    if (mapId === 'ALL') {
-      if (user) {
-        for (const map of maps) {
-          await deleteDoc(doc(db, 'users', user.uid, 'maps', map.id));
-        }
-      } else {
-        localStorage.removeItem('flashmap-maps');
-        localStorage.removeItem('flashmap-current-id');
-        const defaultMapId = crypto.randomUUID();
-        const defaultMap = {
-          id: defaultMapId,
-          title: 'Beginner\'s Guide',
-          nodes: JSON.stringify(initialNodes),
-          edges: JSON.stringify(initialEdges),
-          updatedAt: new Date().toISOString()
-        };
-        setMaps([defaultMap]);
-        switchMap(defaultMapId, defaultMap);
-      }
-    } else {
-      if (user) {
-        await deleteDoc(doc(db, 'users', user.uid, 'maps', mapId));
-      } else {
-        const newMaps = maps.filter(m => m.id !== mapId);
-        if (newMaps.length === 0) {
-          const defaultMapId = crypto.randomUUID();
-          const defaultMap = {
-            id: defaultMapId,
-            title: 'Beginner\'s Guide',
-            nodes: JSON.stringify(initialNodes),
-            edges: JSON.stringify(initialEdges),
-            updatedAt: new Date().toISOString()
-          };
-          setMaps([defaultMap]);
-          switchMap(defaultMapId, defaultMap);
-          localStorage.setItem('flashmap-maps', JSON.stringify([defaultMap]));
-        } else {
-          setMaps(newMaps);
-          localStorage.setItem('flashmap-maps', JSON.stringify(newMaps));
-          if (currentMapId === mapId) {
-            switchMap(newMaps[0].id, newMaps[0]);
-          }
-        }
-      }
-    }
-    setMapToDelete(null);
-  };
-
-  const handleClearAllMaps = () => {
-    setMapToDelete('ALL');
-  };
-
-  const onConnect = useCallback(
-    (params: any) => setEdges((eds) => addEdge({ ...params, type: 'smoothstep', animated: true, style: { stroke: '#818cf8', strokeWidth: 2 } }, eds)),
-    [setEdges],
-  );
-
+  const onConnect = useCallback((params: { source: string; target: string }) => {
+    if (mode !== 'edit' || !canConnect(params.source, params.target, edgesRef.current)) return;
+    takeSnapshot();
+    setEdges(eds => addEdge({ ...params, id: `e-${crypto.randomUUID()}`, data: { kind: 'tree' }, type: 'smoothstep', style: { stroke: '#818cf8', strokeWidth: 2 } }, eds));
+  }, [mode, takeSnapshot, setEdges]);
   const onToggleCollapse = useCallback((nodeId: string) => {
-    let isCollapsed = false;
-    let descendants: string[] = [];
-
-    setNodes((nds) => {
-      const nodeToToggle = nds.find((n) => n.id === nodeId);
-      if (!nodeToToggle) return nds;
-
-      isCollapsed = !nodeToToggle.data.isCollapsed;
-
-      // Find all descendant nodes using edgesRef
-      const getDescendants = (id: string, currentEdges: Edge[]): string[] => {
-        const children = currentEdges.filter((e) => e.source === id).map((e) => e.target);
-        return children.reduce((acc, childId) => {
-          return [...acc, childId, ...getDescendants(childId, currentEdges)];
-        }, children);
-      };
-
-      descendants = getDescendants(nodeId, edgesRef.current);
-
-      return nds.map((n) => {
-        if (n.id === nodeId) {
-          return { ...n, data: { ...n.data, isCollapsed } };
-        }
-        if (descendants.includes(n.id)) {
-          return { ...n, hidden: isCollapsed };
-        }
-        return n;
-      });
-    });
-
-    setEdges((eds) => {
-      return eds.map((e) => {
-        if (descendants.includes(e.target)) {
-          return { ...e, hidden: isCollapsed };
-        }
-        return e;
-      });
-    });
-
-    // We need to trigger layout after state updates
-    setTimeout(() => {
-      setNodes((currentNodes) => {
-        setEdges((currentEdges) => {
-          const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges, 'LR');
-          setNodes(layoutedNodes);
-          return layoutedEdges;
-        });
-        return currentNodes;
-      });
-    }, 50);
-  }, [setNodes, setEdges]);
+    takeSnapshot();
+    const next = nodesRef.current.map(n => n.id === nodeId ? { ...n, data: { ...n.data, isCollapsed: !n.data.isCollapsed } } : n);
+    const visible = applyVisibility(next, edgesRef.current);
+    const result = getLayoutedElements(visible.nodes, visible.edges);
+    setNodes(result.nodes); setEdges(result.edges);
+  }, [takeSnapshot, setNodes, setEdges]);
 
   const clickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -841,7 +425,7 @@ export default function App() {
     }
 
     clickTimeoutRef.current = setTimeout(() => {
-      if (mode === 'study') {
+      if (mode === 'study' && node.type === 'custom') {
         setSelectedNodeData(node.data);
         setIsFlashcardOpen(true);
       }
@@ -862,20 +446,20 @@ export default function App() {
 
   const onNodeDragStart = useCallback((_: any, node: Node) => {
     if (mode !== 'edit') return;
-    
+
     takeSnapshot();
 
     const descendants = getDescendants(node.id, edgesRef.current);
     const initialPositions = new Map<string, { x: number, y: number }>();
     initialPositions.set(node.id, { ...node.position });
-    
+
     descendants.forEach(id => {
       const descNode = nodesRef.current.find(n => n.id === id);
       if (descNode) {
         initialPositions.set(id, { ...descNode.position });
       }
     });
-    
+
     dragStateRef.current = {
       draggedNodeId: node.id,
       initialPositions
@@ -884,7 +468,7 @@ export default function App() {
 
   const onNodeDrag = useCallback((event: any, node: Node) => {
     if (mode !== 'edit') return;
-    
+
     const centerX = node.position.x + (node.measured?.width || 220) / 2;
     const centerY = node.position.y + (node.measured?.height || 100) / 2;
 
@@ -922,10 +506,10 @@ export default function App() {
           const nh = n.measured?.height || 100;
 
           const isStrictlyInside = centerX >= nx && centerX <= nx + nw && centerY >= ny && centerY <= ny + nh;
-          
+
           // Child zone: to the right
           const isChildZone = centerX >= nx + nw * 0.5 && centerX <= nx + nw + 300 && centerY >= ny - 80 && centerY <= ny + nh + 80;
-          
+
           // Sibling zones: vertically aligned
           const isSiblingTopZone = centerX >= nx - 50 && centerX <= nx + nw + 50 && centerY >= ny - 150 && centerY < ny + nh * 0.25;
           const isSiblingBottomZone = centerX >= nx - 50 && centerX <= nx + nw + 50 && centerY > ny + nh * 0.75 && centerY <= ny + nh + 150;
@@ -933,7 +517,7 @@ export default function App() {
           if (isStrictlyInside || isChildZone || isSiblingTopZone || isSiblingBottomZone) {
             const createsCycle = isDescendant(n.id, node.id, edgesRef.current);
             if (createsCycle && !isStrictlyInside) return;
-            
+
             let score = 0;
             let currentDropType: 'child' | 'sibling-top' | 'sibling-bottom' = 'child';
 
@@ -947,7 +531,7 @@ export default function App() {
               currentDropType = isSiblingTopZone ? 'sibling-top' : 'sibling-bottom';
             } else if (isChildZone) {
               let distX = centerX - (nx + nw/2);
-              distX = distX > 0 ? distX * 0.3 : Math.abs(distX); 
+              distX = distX > 0 ? distX * 0.3 : Math.abs(distX);
               const distY = Math.abs(centerY - (ny + nh/2));
               score = distX + distY * 2;
               currentDropType = 'child';
@@ -966,7 +550,7 @@ export default function App() {
       let changed = false;
       const newNodes = nds.map((n) => {
         if (n.id === node.id) return n;
-        
+
         let newPos = n.position;
         let newClassName = n.className || '';
 
@@ -995,7 +579,7 @@ export default function App() {
             newClassName = '';
           }
         }
-        
+
         if (n.position.x !== newPos.x || n.position.y !== newPos.y || n.className !== newClassName) {
           changed = true;
           return { ...n, position: newPos, className: newClassName };
@@ -1021,16 +605,16 @@ export default function App() {
 
     if (orderKey !== lastTargetIdRef.current) {
       lastTargetIdRef.current = orderKey;
-      
-      let nextEdges = edgesRef.current;
+
+      let nextEdges = [...edgesRef.current];
       let nextNodes = nextNodesForLayout;
 
       if (currentDropType === 'floating') {
-        nextEdges = nextEdges.filter(e => e.target !== node.id);
+        nextEdges = nextEdges.filter(e => !isTreeEdge(e) || e.target !== node.id);
         nextNodes = nextNodes.map(n => n.id === node.id ? { ...n, data: { ...n.data, isRoot: true } } : n);
       } else if (currentTargetId) {
-        nextEdges = nextEdges.filter(e => e.target !== node.id);
-        
+        nextEdges = nextEdges.filter(e => !isTreeEdge(e) || e.target !== node.id);
+
         if (currentDropType === 'child') {
           nextEdges.push({
             id: `e-${currentTargetId}-${node.id}`,
@@ -1042,7 +626,7 @@ export default function App() {
           });
           nextNodes = nextNodes.map(n => n.id === node.id ? { ...n, data: { ...n.data, isRoot: false } } : n);
         } else if (currentDropType === 'sibling-top' || currentDropType === 'sibling-bottom') {
-          const targetParentEdge = edgesRef.current.find(e => e.target === currentTargetId);
+          const targetParentEdge = edgesRef.current.find(e => isTreeEdge(e) && e.target === currentTargetId);
           if (targetParentEdge) {
             nextEdges.push({
               id: `e-${targetParentEdge.source}-${node.id}`,
@@ -1066,7 +650,7 @@ export default function App() {
       }
 
       const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(nextNodes, nextEdges, 'LR');
-      
+
       const ghostNodes = layoutedNodes.map(n => ({
         ...n,
         id: `ghost-${n.id}`,
@@ -1076,14 +660,16 @@ export default function App() {
         selectable: false,
         className: 'opacity-40 border-dashed pointer-events-none z-0'
       }));
-      
+
       const ghostEdges = layoutedEdges.map(e => ({
         ...e,
         id: `ghost-${e.id}`,
+        source: `ghost-${e.source}`,
+        target: `ghost-${e.target}`,
         style: { ...e.style, strokeDasharray: '5,5', opacity: 0.4 },
         interactionWidth: 0
       }));
-      
+
       setPreviewLayoutNodes(ghostNodes);
       setPreviewLayoutEdges(ghostEdges);
     }
@@ -1091,7 +677,7 @@ export default function App() {
 
   const onNodeDragStop = useCallback((event: any, node: Node) => {
     if (mode !== 'edit') return;
-    
+
     const initPos = dragStateRef.current?.initialPositions.get(node.id);
     const dx = initPos ? node.position.x - initPos.x : 0;
     const dy = initPos ? node.position.y - initPos.y : 0;
@@ -1106,7 +692,7 @@ export default function App() {
 
     let nextNodes = nodesRef.current.map((n) => {
       let updatedNode = { ...n };
-      
+
       if (n.id === node.id) {
         updatedNode = { ...updatedNode, position: node.position, className: '' };
         if (isFloating) {
@@ -1115,7 +701,7 @@ export default function App() {
           if (isChild) {
             updatedNode.data = { ...updatedNode.data, isRoot: false };
           } else if (isSiblingTop || isSiblingBottom) {
-            const targetParentEdge = edgesRef.current.find(e => e.target === targetNodeId);
+            const targetParentEdge = edgesRef.current.find(e => isTreeEdge(e) && e.target === targetNodeId);
             updatedNode.data = { ...updatedNode.data, isRoot: !targetParentEdge };
           }
         }
@@ -1135,11 +721,11 @@ export default function App() {
     let shouldLayout = false;
 
     if (isFloating) {
-      nextEdges = nextEdges.filter((e) => e.target !== node.id);
+      nextEdges = nextEdges.filter((e) => !isTreeEdge(e) || e.target !== node.id);
       shouldLayout = true;
     } else if (targetNodeId && targetNodeId !== node.id) {
-      const filtered = nextEdges.filter((e) => e.target !== node.id);
-      
+      const filtered = nextEdges.filter((e) => !isTreeEdge(e) || e.target !== node.id);
+
       if (isChild) {
         const newEdge: Edge = {
           id: `e-${targetNodeId}-${node.id}`,
@@ -1151,7 +737,7 @@ export default function App() {
         };
         nextEdges = [...filtered, newEdge];
       } else if (isSiblingTop || isSiblingBottom) {
-        const targetParentEdge = edgesRef.current.find(e => e.target === targetNodeId);
+        const targetParentEdge = edgesRef.current.find(e => isTreeEdge(e) && e.target === targetNodeId);
         if (targetParentEdge) {
           const newEdge: Edge = {
             id: `e-${targetParentEdge.source}-${node.id}`,
@@ -1165,7 +751,7 @@ export default function App() {
         } else {
           nextEdges = filtered;
         }
-        
+
         // Reorder nodes array so layout algorithm respects the sibling order
         const targetIndex = nextNodes.findIndex(n => n.id === targetNodeId);
         const nodeIndex = nextNodes.findIndex(n => n.id === node.id);
@@ -1182,11 +768,11 @@ export default function App() {
       shouldLayout = true;
     } else if (isDrag && !targetNodeId) {
       if (Math.abs(dx) > 150) {
-        const hasIncoming = nextEdges.some(e => e.target === node.id);
+        const hasIncoming = nextEdges.some(e => isTreeEdge(e) && e.target === node.id);
         if (hasIncoming) {
           // Disconnect if dragged far away horizontally
-          nextEdges = nextEdges.filter(e => e.target !== node.id);
-          nextNodes = nextNodes.map(n => 
+          nextEdges = nextEdges.filter(e => !isTreeEdge(e) || e.target !== node.id);
+          nextNodes = nextNodes.map(n =>
             n.id === node.id ? { ...n, data: { ...n.data, isRoot: true } } : n
           );
         }
@@ -1212,7 +798,7 @@ export default function App() {
     setPreviewLayoutEdges([]);
   }, [mode, setEdges, setNodes]);
 
-  const handleSaveNode = (nodeId: string, newData: any) => {
+  const handleSaveNode = (nodeId: string, newData: FlashNodeData) => {
     takeSnapshot();
     setNodes((nds) =>
       nds.map((node) => {
@@ -1224,25 +810,13 @@ export default function App() {
     );
   };
 
-  const handleSaveProgress = (results: any[]) => {
-    if (results.length === 0) return;
-    takeSnapshot();
+  const handleSaveProgress = (results: ReviewResult[]) => {
+    if (!results.length) return;
     setNodes(nds => nds.map(n => {
-      const res = results.find(r => r.id === n.id);
-      if (res) {
-        const newData = { ...n.data };
-        if (res.isSuspended !== undefined) {
-          newData.isSuspended = res.isSuspended;
-        }
-        if (res.srsLevel !== undefined) {
-          newData.srsLevel = res.srsLevel;
-        }
-        if (res.nextReviewDate !== undefined) {
-          newData.nextReviewDate = res.nextReviewDate;
-        }
-        return { ...n, data: newData };
-      }
-      return n;
+      const result = results.find(r => r.id === n.id);
+      if (!result) return n;
+      const { id, ...progress } = result;
+      return { ...n, data: { ...n.data, ...progress } };
     }));
   };
 
@@ -1251,12 +825,12 @@ export default function App() {
     if (mode !== 'edit') return;
     const selectedNodes = nodesRef.current.filter(n => n.selected);
     if (selectedNodes.length !== 1) return;
-    
+
     takeSnapshot();
     const selectedNode = selectedNodes[0];
     const descendants = getDescendants(selectedNode.id, edgesRef.current);
     const nodesToDelete = new Set([selectedNode.id, ...descendants]);
-    
+
     setNodes(nds => nds.filter(n => !nodesToDelete.has(n.id)));
     setEdges(eds => eds.filter(e => !nodesToDelete.has(e.source) && !nodesToDelete.has(e.target)));
   }, [mode, setNodes, setEdges]);
@@ -1275,10 +849,10 @@ export default function App() {
       id: newNodeId,
       type: 'custom',
       position: { x: 0, y: 0 },
-      data: { 
-        label: 'New Concept', 
-        question: 'Question?', 
-        answer: 'Answer', 
+      data: {
+        label: 'New Concept',
+        question: '',
+        answer: '',
         isRoot: false,
         depth: (selectedNode.data.depth || 0) + 1
       }
@@ -1291,7 +865,7 @@ export default function App() {
       animated: true,
       style: { stroke: '#818cf8', strokeWidth: 2 }
     };
-    
+
     setNodes(ns => [...ns.map(n => ({...n, selected: false})), { ...newNode, selected: true }]);
     setEdges(es => [...es, newEdge]);
   }, [mode, setNodes, setEdges]);
@@ -1304,9 +878,9 @@ export default function App() {
       alert('Please select at least one node to create a summary.');
       return;
     }
-    
+
     takeSnapshot();
-    
+
     const newNodeId = `node-${Date.now()}`;
     const newNode: Node = {
       id: newNodeId,
@@ -1316,31 +890,28 @@ export default function App() {
         label: 'Summary',
         question: '',
         answer: '',
+        reviewEnabled: false,
         isRoot: false
       },
     };
-    
+
     const newEdges = selectedNodes.map(n => ({
       id: `e-${n.id}-${newNodeId}`,
       source: n.id,
       target: newNodeId,
+      data: { kind: 'summary' },
       type: 'smoothstep',
       animated: true,
       style: { stroke: '#818cf8', strokeWidth: 2 }
     }));
-    
+
     setNodes(ns => [...ns.map(n => ({...n, selected: false})), { ...newNode, selected: true }]);
     setEdges(es => [...es, ...newEdges]);
-    
+
     setTimeout(() => {
-      setNodes((currentNodes) => {
-        setEdges((currentEdges) => {
-          const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges, 'LR');
-          setNodes(layoutedNodes);
-          return layoutedEdges;
-        });
-        return currentNodes;
-      });
+      const layout = getLayoutedElements(nodesRef.current, edgesRef.current, 'LR');
+      setNodes(layout.nodes);
+      setEdges(layout.edges);
     }, 50);
   }, [mode, setNodes, setEdges, takeSnapshot]);
 
@@ -1352,9 +923,9 @@ export default function App() {
       alert('Please select at least one node to create a boundary.');
       return;
     }
-    
+
     takeSnapshot();
-    
+
     const targetIds = selectedNodes.map(n => n.id);
     const newNodeId = `boundary-${Date.now()}`;
     const newNode: Node = {
@@ -1371,19 +942,14 @@ export default function App() {
       selectable: true,
       draggable: false,
     };
-    
+
     setNodes(ns => [...ns.map(n => ({...n, selected: false})), { ...newNode, selected: true }]);
-    
+
     // Trigger layout to update boundary size
     setTimeout(() => {
-      setNodes((currentNodes) => {
-        setEdges((currentEdges) => {
-          const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges, 'LR');
-          setNodes(layoutedNodes);
-          return layoutedEdges;
-        });
-        return currentNodes;
-      });
+      const layout = getLayoutedElements(nodesRef.current, edgesRef.current, 'LR');
+      setNodes(layout.nodes);
+      setEdges(layout.edges);
     }, 50);
   }, [mode, setNodes, setEdges, takeSnapshot]);
 
@@ -1395,12 +961,13 @@ export default function App() {
       alert('Please select exactly two nodes to create a relationship.');
       return;
     }
-    
+
     takeSnapshot();
-    
+
     const [sourceNode, targetNode] = selectedNodes;
     const newEdge: Edge = {
-      id: `rel-${Date.now()}`,
+      id: `rel-${crypto.randomUUID()}`,
+      data: { kind: 'relationship' },
       source: sourceNode.id,
       target: targetNode.id,
       type: 'bezier',
@@ -1408,7 +975,7 @@ export default function App() {
       style: { stroke: '#f43f5e', strokeWidth: 2, strokeDasharray: '5,5' },
       markerEnd: { type: MarkerType.ArrowClosed, color: '#f43f5e' }
     };
-    
+
     setEdges(es => [...es, newEdge]);
   }, [mode, setEdges, takeSnapshot]);
 
@@ -1422,24 +989,24 @@ export default function App() {
 
     takeSnapshot();
 
-    const parentEdge = currentEdges.find(e => e.target === selectedNode.id);
-    
+    const parentEdge = currentEdges.find(e => isTreeEdge(e) && e.target === selectedNode.id);
+
     const newNodeId = `node-${Date.now()}`;
     const newNode: Node = {
       id: newNodeId,
       type: 'custom',
       position: { x: 0, y: 0 },
-      data: { 
-        label: 'New Concept', 
-        question: 'Question?', 
-        answer: 'Answer', 
+      data: {
+        label: 'New Concept',
+        question: '',
+        answer: '',
         isRoot: !parentEdge,
         depth: selectedNode.data.depth || 0
       }
     };
-    
+
     setNodes(ns => [...ns.map(n => ({...n, selected: false})), { ...newNode, selected: true }]);
-    
+
     if (parentEdge) {
       const newEdge: Edge = {
         id: `e-${parentEdge.source}-${newNodeId}`,
@@ -1471,10 +1038,10 @@ export default function App() {
       id: newNodeId,
       type: 'custom',
       position: { x: 0, y: 0 },
-      data: { 
-        label: 'New Concept', 
-        question: 'Question?', 
-        answer: 'Answer', 
+      data: {
+        label: 'New Concept',
+        question: '',
+        answer: '',
         isRoot: true,
         depth: 0
       }
@@ -1497,7 +1064,7 @@ export default function App() {
         }
         return;
       }
-      
+
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         redo();
@@ -1549,7 +1116,7 @@ export default function App() {
       const bounds = document.querySelector('.react-flow')?.getBoundingClientRect();
       const x = bounds ? event.clientX - bounds.left : Math.random() * 100;
       const y = bounds ? event.clientY - bounds.top : Math.random() * 100;
-      
+
       const newNodeId = `node-${Date.now()}`;
       const newNode: Node = {
         id: newNodeId,
@@ -1562,7 +1129,7 @@ export default function App() {
           isRoot: true,
         },
       };
-      
+
       setNodes(ns => [...ns.map(n => ({...n, selected: false})), { ...newNode, selected: true }]);
     }
   }, [mode, takeSnapshot, setNodes]);
@@ -1582,19 +1149,9 @@ export default function App() {
   );
 
   const getSubtreeNodes = useCallback((rootId: string) => {
-    const subtreeNodeIds = new Set<string>([rootId]);
-    let added = true;
-    while (added) {
-      added = false;
-      edges.forEach(edge => {
-        if (subtreeNodeIds.has(edge.source) && !subtreeNodeIds.has(edge.target)) {
-          subtreeNodeIds.add(edge.target);
-          added = true;
-        }
-      });
-    }
-    return nodes.filter(n => subtreeNodeIds.has(n.id));
-  }, [edges, nodes]);
+    const ids = new Set([rootId, ...getDescendants(rootId, edges)]);
+    return nodes.filter(n => ids.has(n.id));
+  }, [nodes, edges]);
 
   const handleReviewSubtree = useCallback(() => {
     if (!contextMenu) return;
@@ -1605,54 +1162,35 @@ export default function App() {
 
   const handleLayout = useCallback(() => {
     takeSnapshot();
-    setNodes((currentNodes) => {
-      setEdges((currentEdges) => {
-        const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges, 'LR');
-        setNodes(layoutedNodes);
-        return layoutedEdges;
-      });
-      return currentNodes;
-    });
-  }, [takeSnapshot, setNodes, setEdges]);
+    const layout = getLayoutedElements(nodesRef.current, edgesRef.current, 'LR');
+      setNodes(layout.nodes);
+      setEdges(layout.edges);
+    setTimeout(() => { void fitView({ duration: 300, padding: 0.2, maxZoom: 1 }); }, 80);
+  }, [takeSnapshot, setNodes, setEdges, fitView]);
 
   const handleGenerateNode = async () => {
     if (!newNodeTitle.trim() && !newNodeContent.trim()) return;
-    
+
+    const selectedBefore = nodesRef.current.filter(n => n.selected && n.type === 'custom');
+    const targetBefore = selectedBefore.length === 1 ? selectedBefore[0].id : null;
     setIsGeneratingNode(true);
+    const epoch = generationEpoch.current;
     try {
       const prompt = `Based on the following title and content, generate a single flashcard node.
       Keep the 'label' concise (1-4 words).
-      
+
       Title: ${newNodeTitle}
       Content: ${newNodeContent}`;
 
-      const response = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, schema: {
-            type: Type.OBJECT,
-            properties: {
-              label: { type: Type.STRING },
-              question: { type: Type.STRING },
-              answer: { type: Type.STRING }
-            },
-            required: ["label", "question", "answer"]
-          } 
-        })
-      });
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Generation failed");
-      }
-      const data = await response.json();
+      const generated = validateCards(await generateAI('node', prompt), 1);
+      if (epoch !== generationEpoch.current) throw new Error('导图已切换，请在当前导图重新生成');
+      const parsedData = generated[0];
 
-      const parsedData = JSON.parse(response.text || '{}');
-      
       if (parsedData.label && parsedData.question && parsedData.answer) {
         takeSnapshot();
-        
-        const selectedNodes = nodesRef.current.filter(n => n.selected);
-        const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : null;
+
+        const selectedNode = targetBefore ? nodesRef.current.find(n => n.id === targetBefore) : null;
+        if (targetBefore && !selectedNode) throw new Error('目标节点已删除，请重新生成');
 
         if (selectedNode) {
           const newNode: Node = {
@@ -1663,6 +1201,7 @@ export default function App() {
               label: parsedData.label,
               question: parsedData.question,
               answer: parsedData.answer,
+              sourceExcerpt: parsedData.sourceExcerpt && newNodeContent.includes(parsedData.sourceExcerpt) ? parsedData.sourceExcerpt : '',
               isRoot: false,
               depth: (selectedNode.data.depth || 0) + 1
             }
@@ -1681,14 +1220,9 @@ export default function App() {
           setEdges(eds => [...eds, newEdge]);
 
           setTimeout(() => {
-            setNodes((currentNodes) => {
-              setEdges((currentEdges) => {
-                const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges, 'LR');
-                setNodes(layoutedNodes);
-                return layoutedEdges;
-              });
-              return currentNodes;
-            });
+            const layout = getLayoutedElements(nodesRef.current, edgesRef.current, 'LR');
+      setNodes(layout.nodes);
+      setEdges(layout.edges);
           }, 50);
 
         } else {
@@ -1697,7 +1231,7 @@ export default function App() {
           let targetY = center.y;
           let offset = 0;
           let found = false;
-          
+
           while (!found && offset < 1000) {
             const isOccupied = nodesRef.current.some(n => {
               const nx = n.position.x;
@@ -1707,7 +1241,7 @@ export default function App() {
               return targetX >= nx - 50 && targetX <= nx + nw + 50 &&
                      targetY >= ny - 50 && targetY <= ny + nh + 50;
             });
-            
+
             if (!isOccupied) {
               found = true;
             } else {
@@ -1729,16 +1263,17 @@ export default function App() {
               depth: 0
             }
           };
-          
+
           setNodes(nds => [...nds.map(n => ({...n, selected: false})), { ...newNode, selected: true }]);
         }
-        
+
         setNewNodeTitle('');
         setNewNodeContent('');
       }
     } catch (error) {
-      console.error("Failed to generate node:", error);
-      alert("Failed to generate node. Please try again.");
+      console.error('操作失败，请重试。');
+      if (error instanceof AICancelledError) return;
+      alert(error instanceof Error ? error.message : '生成失败，请重试');
     } finally {
       setIsGeneratingNode(false);
     }
@@ -1746,55 +1281,33 @@ export default function App() {
 
   const handleGenerate = async () => {
     if (!inputText.trim()) return;
-    
-    const selectedNodes = nodes.filter(n => n.selected);
+
+    const selectedNodes = nodes.filter(n => n.selected && n.type === 'custom');
     const targetNode = selectedNodes.length === 1 ? selectedNodes[0] : null;
 
     setIsGenerating(true);
+    const epoch = generationEpoch.current;
     try {
-      const prompt = `Analyze the following text or topic and create a highly detailed, comprehensive mind map. 
-      
+      const prompt = `Analyze the following text or topic and create a highly detailed, comprehensive mind map.
+
       Instructions:
-      1. Extract and summarize all key knowledge points, breaking them down into a deep hierarchical structure (main topics -> subtopics -> specific details).
-      2. Do not be overly general; dive deep into the specifics and nuances.
-      3. For EVERY single node (knowledge point), create a specific, detailed flashcard with a challenging question and a comprehensive answer to rigorously test the user's understanding.
-      
-      Return a flat JSON array of nodes. 
+      1. Create 8 to 20 core knowledge nodes with at most 4 hierarchy levels. Match the input language.
+      2. Keep each question focused on a single knowledge point and each answer concise.
+      3. Include sourceExcerpt only when quoting a short exact passage from the supplied notes; otherwise leave it empty.
+
+      Return a flat JSON array of nodes.
       - The root node should have a parentId of null.
       - Every other node must have a parentId corresponding to its parent concept.
       - Keep the 'label' concise (1-5 words) representing the topic.
       - The 'question' and 'answer' should contain the detailed flashcard content.
-      
+
       ${targetNode ? `Context: This new mind map will be attached as a sub-topic to the concept "${targetNode.data.label}".\n      ` : ''}Input text/topic:
       ${inputText}`;
 
-      const response = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, schema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING },
-                parentId: { type: Type.STRING, nullable: true },
-                label: { type: Type.STRING },
-                question: { type: Type.STRING },
-                answer: { type: Type.STRING }
-              },
-              required: ["id", "label", "question", "answer"]
-            }
-          } 
-        })
-      });
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Generation failed");
-      }
-      const data = await response.json();
+      const generated = validateCards(await generateAI('tree', prompt), 30);
+      if (epoch !== generationEpoch.current) throw new Error('导图已切换，请在当前导图重新生成');
+      const rawData: FlashcardData[] = generated;
 
-      const rawData: FlashcardData[] = JSON.parse(response.text || '[]');
-      
       const parsedData: FlashcardData[] = [];
       const seenIds = new Set<string>();
       rawData.forEach(item => {
@@ -1806,7 +1319,7 @@ export default function App() {
 
       const newNodes: Node[] = [];
       const newEdges: Edge[] = [];
-      
+
       // Create a mapping from AI generated IDs to new unique IDs
       const idMap = new Map<string, string>();
       parsedData.forEach(item => {
@@ -1816,12 +1329,12 @@ export default function App() {
       parsedData.forEach((item) => {
         const isRoot = item.parentId === null || item.parentId === 'null' || item.parentId === '';
         const newId = idMap.get(item.id) || crypto.randomUUID();
-        
+
         newNodes.push({
           id: newId,
           type: 'custom',
           position: { x: 0, y: 0 },
-          data: { label: item.label, question: item.question, answer: item.answer, isRoot: isRoot && !targetNode }
+          data: { label: item.label, question: item.question, answer: item.answer, sourceExcerpt: item.sourceExcerpt && inputText.includes(item.sourceExcerpt) ? item.sourceExcerpt : '', isRoot: isRoot && !targetNode }
         });
 
         if (!isRoot && item.parentId) {
@@ -1852,8 +1365,9 @@ export default function App() {
       setIsPreviewModalOpen(true);
       setInputText('');
     } catch (error) {
-      console.error("Failed to generate mind map:", error);
-      alert("Failed to generate mind map. Please try again.");
+      console.error('操作失败，请重试。');
+      if (error instanceof AICancelledError) return;
+      alert(error instanceof Error ? error.message : '生成失败，请重试');
     } finally {
       setIsGenerating(false);
     }
@@ -1865,47 +1379,26 @@ export default function App() {
     const targetNode = selectedNodes[0];
 
     setIsExpanding(true);
+    const epoch = generationEpoch.current;
     try {
-      const prompt = `The user wants to deeply expand the concept "${targetNode.data.label}". 
-      Context: Question: "${targetNode.data.question}", Answer: "${targetNode.data.answer}".
-      
-      Generate 4 to 8 highly detailed sub-concepts that dive deep into the specifics, nuances, or components of this topic.
-      For each sub-concept, extract the core knowledge point and create a detailed flashcard with a challenging question and a comprehensive answer.
-      
+      const prompt = `The user wants to deeply expand the concept "${targetNode.data.label}".
+      Context: 问题: "${targetNode.data.question}", 答案: "${targetNode.data.answer}".
+
+      Generate 3 to 6 focused sub-concepts in the input language. Each flashcard must test one knowledge point with a concise core answer.
+      For each sub-concept, create one focused question and a concise answer, using the language of the selected concept.
+
       Return a flat JSON array of nodes.
       - id: unique string identifier
       - label: short title (1-5 words)
       - question: detailed flashcard question
       - answer: comprehensive flashcard answer`;
 
-      const response = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, schema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING },
-                label: { type: Type.STRING },
-                question: { type: Type.STRING },
-                answer: { type: Type.STRING }
-              },
-              required: ["id", "label", "question", "answer"]
-            }
-          } 
-        })
-      });
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Generation failed");
-      }
-      const data = await response.json();
+      const generated = validateCards(await generateAI('expand', prompt), 6);
+      if (epoch !== generationEpoch.current) throw new Error('导图已切换，请在当前导图重新生成');
+      const parsedData = generated;
 
-      const parsedData = JSON.parse(response.text || '[]');
-      
       const newNodes: Node[] = parsedData.map((item: any) => ({
-        id: `node-${Date.now()}-${item.id}`,
+        id: crypto.randomUUID(),
         type: 'custom',
         position: { x: 0, y: 0 },
         data: { label: item.label, question: item.question, answer: item.answer, isRoot: false }
@@ -1925,8 +1418,9 @@ export default function App() {
       setPreviewMode('expand');
       setIsPreviewModalOpen(true);
     } catch (error) {
-      console.error("Failed to expand node:", error);
-      alert("Failed to expand node with AI.");
+      console.error('操作失败，请重试。');
+      if (error instanceof AICancelledError) return;
+      alert(error instanceof Error ? error.message : '生成失败，请重试');
     } finally {
       setIsExpanding(false);
     }
@@ -1935,15 +1429,21 @@ export default function App() {
   const handleConfirmPreview = (selectedIds: string[]) => {
     takeSnapshot();
     const approvedNodes = pendingNodes.filter(n => selectedIds.includes(n.id));
-    
-    const approvedEdges = pendingEdges.filter(e => {
-      if (!selectedIds.includes(e.target)) return false;
-      const sourceExists = nodes.some(n => n.id === e.source) || selectedIds.includes(e.source);
-      return sourceExists;
-    });
+
+    const parentByChild = new Map(pendingEdges.map(e => [e.target, e.source]));
+    const approvedEdges: Edge[] = [];
+    for (const child of approvedNodes) {
+      const seen = new Set([child.id]);
+      let parent = parentByChild.get(child.id);
+      while (parent && !selectedIds.includes(parent) && !nodes.some(n => n.id === parent)) {
+        if (seen.has(parent)) { parent = undefined; break; }
+        seen.add(parent); parent = parentByChild.get(parent);
+      }
+      if (parent) approvedEdges.push({ id: 'e-' + parent + '-' + child.id, source: parent, target: child.id, data: { kind: 'tree' }, type: 'smoothstep' });
+    }
 
     const finalNewNodes = approvedNodes.map(n => {
-      const hasIncomingEdge = approvedEdges.some(e => e.target === n.id);
+      const hasIncomingEdge = approvedEdges.some(e => isTreeEdge(e) && e.target === n.id);
       return {
         ...n,
         data: { ...n.data, isRoot: !hasIncomingEdge }
@@ -1967,7 +1467,7 @@ export default function App() {
       setNodes(layoutedNodes);
       setEdges(layoutedEdges);
     }
-    
+
     setIsPreviewModalOpen(false);
     setPendingNodes([]);
     setPendingEdges([]);
@@ -1975,24 +1475,13 @@ export default function App() {
 
   const selectedNodeCount = nodes.filter(n => n.selected).length;
 
-  const handleSignIn = async () => {
-    try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
-    } catch (error: any) {
-      if (error.code === 'auth/popup-closed-by-user') {
-        console.log('User closed the sign-in popup.');
-      } else {
-        console.error('Sign-in error:', error);
-        alert('Failed to sign in: ' + error.message);
-      }
-    }
-  };
+  const { generate: generateAI, configured: aiConfigured, keyDialog, closeKeyDialog, openKeySettings } = useAI();
 
   return (
-    <GraphContext.Provider value={{ onToggleCollapse }}>
+    <GraphContext.Provider value={{ onToggleCollapse, hasChildren: id => edges.some(e => isTreeEdge(e) && e.source === id) }}>
       <div className="flex h-screen w-full bg-slate-50 overflow-hidden font-sans">
         {/* Sidebar */}
-        <div className={cn("bg-white border-r border-slate-200 flex flex-col shadow-sm z-20 transition-all duration-300 overflow-hidden shrink-0", isSidebarOpen ? "w-80" : "w-0 border-none opacity-0")}>
+        <div className={cn("absolute inset-y-0 left-0 md:relative bg-white border-r border-slate-200 flex flex-col shadow-sm z-20 transition-all duration-300 overflow-hidden shrink-0", isSidebarOpen ? "w-80" : "w-0 border-none opacity-0")}>
           <div className="w-80 flex flex-col h-full">
           <div className="p-6 border-b border-slate-100 flex items-center gap-3">
             <div className="p-2 bg-indigo-600 rounded-xl text-white shadow-md shadow-indigo-200">
@@ -2001,38 +1490,36 @@ export default function App() {
             <div className="flex-1">
               <h1 className="text-xl font-bold text-slate-800 tracking-tight">FlashMap</h1>
               <p className="text-xs text-slate-500 font-medium">
-                {user ? (isSyncing ? 'Syncing...' : 'Saved to Cloud') : 'Auto-saved locally'}
+                {saveStatus}
               </p>
             </div>
-            <div>
-              {user ? (
-                <button onClick={() => signOut(auth)} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" title="Sign Out">
-                  <LogOut size={18} />
-                </button>
-              ) : (
-                <button onClick={handleSignIn} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Sign In to Sync">
-                  <LogIn size={18} />
-                </button>
-              )}
-            </div>
+            <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] text-slate-500">桌面版</span>
           </div>
 
           <div className="p-6 flex-1 flex flex-col gap-4 overflow-y-auto custom-scrollbar">
-            
+
+            {storageError && <div role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{storageError}</div>}
+            {desktopImportMessage && <div role="status" className="rounded-xl bg-emerald-50 p-3 text-xs text-emerald-800">{desktopImportMessage}</div>}
+            {saveStatus.includes('失败') && <button onClick={() => void retrySave()} className="text-xs text-indigo-600">重试本机保存</button>}
+            <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4">
+              <div className="text-sm font-semibold text-indigo-900">今日学习</div>
+              <p className="mt-1 text-xs text-indigo-700">{nodes.filter(n => isDue(n, now)).length} 张待复习 · {nodes.filter(isReviewable).length} 张有效卡片</p>
+              <button onClick={() => { setReviewSubtreeId(null); setMode('review'); }} className="mt-3 w-full rounded-lg bg-indigo-600 py-2 text-sm font-medium text-white">开始复习</button>
+            </div>
             {/* Folders / Maps Section */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
                   <Folder size={16} className="text-indigo-500" />
-                  My Maps
+                  我的导图
                 </label>
-                <button onClick={handleCreateMap} className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors" title="New Map">
+                <button onClick={handleCreateMap} className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors" title="新建导图">
                   <Plus size={16} />
                 </button>
               </div>
               <div className="max-h-48 overflow-y-auto space-y-1 custom-scrollbar pr-1">
                 {maps.map(map => (
-                  <div 
+                  <div
                     key={map.id}
                     onClick={() => {
                       if (editingMapId !== map.id) switchMap(map.id);
@@ -2068,21 +1555,21 @@ export default function App() {
                           <span className="truncate">{map.id === currentMapId ? mapTitle : map.title}</span>
                         </div>
                         <div className="opacity-0 group-hover:opacity-100 flex items-center transition-all">
-                          <button 
+                          <button
                             onClick={(e) => {
                               e.stopPropagation();
                               setEditingMapId(map.id);
                               setEditingTitle(map.id === currentMapId ? mapTitle : map.title);
                             }}
                             className="p-1 text-slate-400 hover:text-indigo-600 rounded"
-                            title="Rename Map"
+                            title="重命名导图"
                           >
                             <Edit3 size={14} />
                           </button>
-                          <button 
+                          <button
                             onClick={(e) => handleDeleteMap(map.id, e)}
                             className="p-1 text-slate-400 hover:text-red-500 rounded"
-                            title="Delete Map"
+                            title="删除导图"
                           >
                             <Trash2 size={14} />
                           </button>
@@ -2096,23 +1583,24 @@ export default function App() {
 
           <hr className="border-slate-100 my-2" />
 
-          {/* AI Generate Node Section */}
+          {/* AI 生成卡片 Section */}
           <div className="space-y-2">
+            <p className="text-[11px] text-slate-500">AI 生成会发送输入的学习内容，请勿填写密钥或私人资料。</p>
             <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
               <BrainCircuit size={16} className="text-fuchsia-500" />
-              Generate New Node
+              生成知识卡片
             </label>
             <input
               type="text"
               value={newNodeTitle}
               onChange={(e) => setNewNodeTitle(e.target.value)}
-              placeholder="Node Title (Optional)"
+              placeholder="知识点标题 (Optional)"
               className="w-full p-2 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent transition-all text-sm text-slate-700 placeholder:text-slate-400"
             />
             <textarea
               value={newNodeContent}
               onChange={(e) => setNewNodeContent(e.target.value)}
-              placeholder="Enter content to generate a node..."
+              placeholder="粘贴学习内容，用于生成一道问答…"
               className="w-full h-20 p-2 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent resize-none transition-all text-sm text-slate-700 placeholder:text-slate-400"
             />
             <button
@@ -2121,7 +1609,7 @@ export default function App() {
               className="w-full py-2 px-4 bg-fuchsia-600 hover:bg-fuchsia-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2 shadow-sm"
             >
               {isGeneratingNode ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-              Generate Node
+              生成卡片
             </button>
           </div>
 
@@ -2131,12 +1619,12 @@ export default function App() {
           <div className="space-y-2">
             <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
               <BookOpen size={16} className="text-indigo-500" />
-              Generate New Tree
+              生成知识导图
             </label>
             <textarea
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder="Enter a topic or paste notes to generate a completely new tree in this map..."
+              placeholder="输入主题或粘贴笔记，生成简洁的知识结构…"
               className="w-full h-32 p-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none transition-all text-sm text-slate-700 placeholder:text-slate-400"
             />
             <button
@@ -2145,22 +1633,22 @@ export default function App() {
               className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl font-medium transition-all flex items-center justify-center gap-2 shadow-sm"
             >
               {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
-              Generate Tree
+              生成导图
             </button>
           </div>
 
           <hr className="border-slate-100 my-2" />
 
-          {/* AI Assistant Section (Contextual) */}
+          {/* AI 学习助手 Section (Contextual) */}
           <div className="space-y-2">
             <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
               <Brain size={16} className="text-emerald-500" />
-              AI Assistant
+              AI 学习助手
             </label>
             {selectedNodeCount === 1 ? (
               <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3">
                 <p className="text-xs text-emerald-800 mb-3">
-                  Selected: <span className="font-bold">{nodes.find(n => n.selected)?.data.label}</span>
+                  已选择： <span className="font-bold">{nodes.find(n => n.selected)?.data.label}</span>
                 </p>
                 <button
                   onClick={handleAIExpand}
@@ -2168,12 +1656,12 @@ export default function App() {
                   className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 shadow-sm"
                 >
                   {isExpanding ? <Loader2 size={14} className="animate-spin" /> : <PlusCircle size={14} />}
-                  AI Expand Concept
+                  展开知识点
                 </button>
               </div>
             ) : (
               <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 text-center">
-                <p className="text-xs text-slate-500">Select exactly one node on the canvas to let AI expand it with sub-concepts.</p>
+                <p className="text-xs text-slate-500">选择一个知识节点，让 AI 补充相关知识点。</p>
               </div>
             )}
           </div>
@@ -2188,21 +1676,21 @@ export default function App() {
                 className="w-full py-2 px-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-medium transition-all flex items-center justify-center gap-1.5"
               >
                 <Download size={14} />
-                Export
+                导出备份
               </button>
               <button
                 onClick={() => fileInputRef.current?.click()}
                 className="w-full py-2 px-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-medium transition-all flex items-center justify-center gap-1.5"
               >
                 <Upload size={14} />
-                Import
+                导入导图
               </button>
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleImport} 
-                accept=".json" 
-                className="hidden" 
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleImport}
+                accept=".json"
+                className="hidden"
               />
             </div>
             <button
@@ -2210,7 +1698,7 @@ export default function App() {
               className="w-full py-2 px-4 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
             >
               <Network size={16} />
-              Auto Layout
+              自动布局
             </button>
             <button
               onClick={() => {
@@ -2224,7 +1712,7 @@ export default function App() {
               className="w-full py-2 px-4 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
             >
               <RotateCw size={16} />
-              Restore Beginner's Guide
+              恢复学习指南
             </button>
             {mode === 'edit' && (
               <>
@@ -2251,7 +1739,7 @@ export default function App() {
                   className="w-full py-2 px-4 bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-600 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
                 >
                   <PlusCircle size={16} />
-                  Add Independent Node
+                  添加独立节点
                 </button>
                 <button
                   onClick={handleDeleteSelected}
@@ -2259,7 +1747,7 @@ export default function App() {
                   className="w-full py-2 px-4 bg-white border border-red-200 hover:bg-red-50 disabled:bg-slate-50 disabled:border-slate-200 disabled:text-slate-400 text-red-600 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
                 >
                   <Trash2 size={16} />
-                  Delete Node & Subtree
+                  删除节点及子树
                 </button>
               </>
             )}
@@ -2267,30 +1755,35 @@ export default function App() {
 
           <hr className="border-slate-100 my-2" />
 
-          {/* Settings Section */}
+          {/* 设置 Section */}
           <div className="space-y-2">
             <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
               <Settings size={16} className="text-slate-500" />
-              Settings
+              设置
             </label>
             <label className="flex items-center justify-between cursor-pointer p-2 hover:bg-slate-50 rounded-lg border border-transparent hover:border-slate-200 transition-colors">
-              <span className="text-sm text-slate-700">Show Minimap</span>
+              <span className="text-sm text-slate-700">显示缩略图</span>
               <div className={cn("w-8 h-4 rounded-full transition-colors relative", showMiniMap ? "bg-indigo-500" : "bg-slate-300")}>
                 <div className={cn("absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform", showMiniMap ? "translate-x-4" : "translate-x-0")} />
               </div>
-              <input 
-                type="checkbox" 
-                className="hidden" 
-                checked={showMiniMap} 
-                onChange={(e) => setShowMiniMap(e.target.checked)} 
+              <input
+                type="checkbox"
+                className="hidden"
+                checked={showMiniMap}
+                onChange={(e) => setShowMiniMap(e.target.checked)}
               />
             </label>
+            <button onClick={() => void openKeySettings()} className="flex w-full items-center justify-between rounded-lg border border-slate-200 p-3 text-sm text-slate-700 hover:bg-slate-50">
+              <span className="flex items-center gap-2"><KeyRound size={16} />AI 密钥设置</span>
+              <span className={cn("text-xs", aiConfigured ? "text-emerald-600" : "text-slate-400")}>{aiConfigured ? '已配置' : '未配置'}</span>
+            </button>
+            <p className="px-2 text-[11px] leading-5 text-slate-400">导图与复习仅保存在本机；AI 生成需要联网。</p>
             <button
               onClick={handleClearAllMaps}
               className="w-full py-2 px-4 bg-white border border-red-200 hover:bg-red-50 text-red-600 rounded-xl text-xs font-medium transition-all flex items-center justify-center gap-2 mt-2"
             >
               <Trash2 size={14} />
-              Clear All Maps
+              清空所有导图
             </button>
           </div>
 
@@ -2304,7 +1797,7 @@ export default function App() {
         <button
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
           className="absolute top-4 left-4 z-10 bg-white/80 backdrop-blur-sm p-2 rounded-xl shadow-sm border border-slate-200 hover:bg-white text-slate-600 transition-all"
-          title={isSidebarOpen ? "Close Sidebar" : "Open Sidebar"}
+          title={isSidebarOpen ? "收起侧栏" : "展开侧栏"}
         >
           {isSidebarOpen ? <PanelLeftClose size={20} /> : <PanelLeftOpen size={20} />}
         </button>
@@ -2318,7 +1811,7 @@ export default function App() {
               mode === 'study' ? "bg-indigo-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-100"
             )}
           >
-            <Book size={16} /> Study Mode
+            <Book size={16} /> 学习模式
           </button>
           <button
             onClick={() => setMode('edit')}
@@ -2327,7 +1820,7 @@ export default function App() {
               mode === 'edit' ? "bg-emerald-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-100"
             )}
           >
-            <Edit3 size={16} /> Edit Mode
+            <Edit3 size={16} /> 编辑模式
           </button>
           <button
             onClick={() => setMode('review')}
@@ -2336,17 +1829,21 @@ export default function App() {
               mode === 'review' ? "bg-amber-500 text-white shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-100"
             )}
           >
-            <BrainCircuit size={16} /> Review Mode
+            <BrainCircuit size={16} /> 复习模式
           </button>
         </div>
 
         <ReactFlow
           nodes={[...nodes.filter(n => !n.hidden), ...previewLayoutNodes]}
-          edges={[...edges.filter(e => !e.hidden), ...previewLayoutEdges].map(e => ({ ...e, type: 'smoothstep' }))}
+          edges={[...edges.filter(e => !e.hidden), ...previewLayoutEdges]}
           defaultEdgeOptions={{ type: 'smoothstep', animated: true, style: { stroke: '#818cf8', strokeWidth: 2 } }}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          isValidConnection={connection => mode === 'edit' && canConnect(connection.source, connection.target, edges)}
+          nodesDraggable={mode === 'edit'}
+          nodesConnectable={mode === 'edit'}
+          deleteKeyCode={null}
           onNodeClick={(e, node) => {
             setContextMenu(null);
             onNodeClick(e, node);
@@ -2365,7 +1862,7 @@ export default function App() {
           <Background color="#cbd5e1" gap={16} size={1} />
           <Controls className="bg-white shadow-md border-slate-200 rounded-lg overflow-hidden mb-16" />
           {showMiniMap && (
-            <MiniMap 
+            <MiniMap
               position="top-right"
               pannable
               zoomable
@@ -2472,25 +1969,25 @@ export default function App() {
               </button>
             </motion.div>
           ) : mode === 'study' ? (
-            <motion.div 
+            <motion.div
               key="study-hint"
               initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
               className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 bg-indigo-600/90 backdrop-blur text-white px-6 py-3 rounded-full shadow-lg text-sm flex items-center gap-2"
             >
-              <Sparkles size={16} /> Click any node to flip the flashcard!
+              <Sparkles size={16} /> 点击知识节点查看闪卡，进入复习模式检验记忆。
             </motion.div>
           ) : mode === 'select-topic' ? (
-            <motion.div 
+            <motion.div
               key="select-topic-hint"
               initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
               className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 bg-emerald-600/90 backdrop-blur text-white px-6 py-3 rounded-full shadow-lg text-sm flex items-center gap-2"
             >
               <BrainCircuit size={16} /> Click a node to review its subtree
-              <button 
-                onClick={() => setMode('review')} 
+              <button
+                onClick={() => setMode('review')}
                 className="ml-4 px-2 py-1 bg-white/20 hover:bg-white/30 rounded text-xs transition-colors"
               >
-                Cancel
+                取消
               </button>
             </motion.div>
           ) : null}
@@ -2537,11 +2034,11 @@ export default function App() {
             >
               <div className="p-6">
                 <h2 className="text-lg font-semibold text-slate-900 mb-2">
-                  {mapToDelete === 'ALL' ? 'Clear All Maps' : 'Delete Map'}
+                  {mapToDelete === 'ALL' ? '清空所有导图' : '删除导图'}
                 </h2>
                 <p className="text-sm text-slate-600">
-                  {mapToDelete === 'ALL' 
-                    ? 'Are you sure you want to delete ALL your maps? This action cannot be undone.' 
+                  {mapToDelete === 'ALL'
+                    ? 'Are you sure you want to delete ALL your maps? This action cannot be undone.'
                     : 'Are you sure you want to delete this map? This action cannot be undone.'}
                 </p>
                 <div className="flex gap-3 mt-6">
@@ -2549,7 +2046,7 @@ export default function App() {
                     onClick={() => setMapToDelete(null)}
                     className="flex-1 px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
                   >
-                    Cancel
+                    取消
                   </button>
                   <button
                     onClick={confirmDeleteMap}
@@ -2565,10 +2062,12 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <FlashcardModal 
-        isOpen={isFlashcardOpen} 
-        onClose={() => setIsFlashcardOpen(false)} 
-        nodeData={selectedNodeData} 
+      {keyDialog && <AIKeyModal {...keyDialog} onClose={closeKeyDialog} />}
+
+      <FlashcardModal
+        isOpen={isFlashcardOpen}
+        onClose={() => setIsFlashcardOpen(false)}
+        nodeData={selectedNodeData ? { label: selectedNodeData.label || '', question: selectedNodeData.question || '', answer: selectedNodeData.answer || '', sourceExcerpt: selectedNodeData.sourceExcerpt } : null}
       />
 
       <EditNodeModal
@@ -2583,6 +2082,7 @@ export default function App() {
         onClose={() => setIsPreviewModalOpen(false)}
         pendingNodes={pendingNodes}
         onConfirm={handleConfirmPreview}
+        onUpdateNode={(id, field, value) => setPendingNodes(current => current.map(n => n.id === id ? { ...n, data: { ...n.data, [field]: value } } : n))}
         mode={previewMode}
       />
 
@@ -2595,6 +2095,15 @@ export default function App() {
         nodes={reviewSubtreeId ? getSubtreeNodes(reviewSubtreeId) : nodes}
         forceReviewAll={!!reviewSubtreeId}
         onSaveProgress={handleSaveProgress}
+        topicTitle={reviewSubtreeId ? nodes.find(n => n.id === reviewSubtreeId)?.data.label : mapTitle}
+        onLocateNode={id => {
+          const ancestors = new Set<string>();
+          let parent = edges.find(e => isTreeEdge(e) && e.target === id)?.source;
+          while (parent && !ancestors.has(parent)) { ancestors.add(parent); parent = edges.find(e => isTreeEdge(e) && e.target === parent)?.source; }
+          const graph = applyVisibility(nodes.map(n => ({ ...n, selected: n.id === id, data: { ...n.data, isCollapsed: ancestors.has(n.id) ? false : n.data.isCollapsed } })), edges);
+          setNodes(graph.nodes); setEdges(graph.edges); setMode('study'); setReviewSubtreeId(null);
+          setTimeout(() => { void fitView({ nodes: [{ id }], duration: 400, maxZoom: 1.2 }); }, 50);
+        }}
         onSelectTopic={() => {
           setMode('select-topic');
         }}
@@ -2603,4 +2112,3 @@ export default function App() {
     </GraphContext.Provider>
   );
 }
-

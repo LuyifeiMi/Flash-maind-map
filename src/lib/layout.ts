@@ -1,7 +1,11 @@
-import { Edge, Node } from '@xyflow/react';
+import { Edge } from '@xyflow/react';
+import type { FlashNode as Node } from '../types';
+import { isTreeEdge, normalizeEdges } from './graph';
 import { flextree } from 'd3-flextree';
 
 export const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => {
+  nodes = [...new Map(nodes.map(n => [n.id, n])).values()];
+  edges = normalizeEdges(nodes, edges);
   const visibleNodes = nodes.filter(n => !n.hidden);
   const hiddenNodes = nodes.filter(n => n.hidden);
   
@@ -12,16 +16,16 @@ export const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'L
   const hiddenEdges = edges.filter(e => e.hidden);
 
   // 1. Build adjacency list and find roots
-  const adjacency: Record<string, string[]> = {};
-  const incomingCount: Record<string, number> = {};
+  const adjacency: Record<string, string[]> = Object.create(null);
+  const incomingCount: Record<string, number> = Object.create(null);
   
   treeNodes.forEach(n => {
     adjacency[n.id] = [];
     incomingCount[n.id] = 0;
   });
 
-  visibleEdges.forEach(e => {
-    if (adjacency[e.source]) {
+  visibleEdges.filter(isTreeEdge).forEach(e => {
+    if (adjacency[e.source] && adjacency[e.target]) {
       adjacency[e.source].push(e.target);
     }
     if (incomingCount[e.target] !== undefined) {
@@ -82,17 +86,18 @@ export const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'L
     return a.position.x - b.position.x;
   });
 
-  const getSize = (depth: number) => {
-    if (depth === 0) return { width: 320, height: 140 };
-    if (depth === 1) return { width: 260, height: 110 };
-    if (depth === 2) return { width: 200, height: 80 };
-    return { width: 160, height: 60 };
+  const getSize = (depth: number, node?: Node) => {
+    const measuredHeight = node?.measured?.height || 0;
+    if (depth === 0) return { width: 320, height: Math.max(180, measuredHeight) };
+    if (depth === 1) return { width: 260, height: Math.max(155, measuredHeight) };
+    if (depth === 2) return { width: 200, height: Math.max(130, measuredHeight) };
+    return { width: 160, height: Math.max(110, measuredHeight) };
   };
 
   // Build hierarchy for d3-flextree
   const buildHierarchy = (nodeId: string, depth: number, currentVisited: Set<string>): any => {
     const node = treeNodes.find(n => n.id === nodeId)!;
-    const { width, height } = getSize(depth);
+    const { width, height } = getSize(depth, node);
     
     const childrenIds = adjacency[nodeId] || [];
     const children = [];
@@ -136,7 +141,7 @@ export const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'L
 
     tree.each((tNode: any) => {
       const { id, node, depth } = tNode.data;
-      const { width, height } = getSize(depth);
+      const { width, height } = getSize(depth, node);
       
       // flextree uses x for the cross-axis and y for the main-axis
       // For LR: main-axis is horizontal (y in flextree), cross-axis is vertical (x in flextree)
@@ -162,6 +167,7 @@ export const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'L
         data: {
           ...node.data,
           depth,
+          isRoot: depth === 0,
         }
       });
     });
@@ -192,7 +198,7 @@ export const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'L
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     targets.forEach(t => {
-      const { width, height } = getSize(t.data.depth as number || 0);
+      const { width, height } = getSize(t.data.depth || 0, t);
       minX = Math.min(minX, t.position.x);
       minY = Math.min(minY, t.position.y);
       maxX = Math.max(maxX, t.position.x + width);

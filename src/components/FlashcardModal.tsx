@@ -10,6 +10,7 @@ interface FlashcardModalProps {
     label: string;
     question: string;
     answer: string;
+    sourceExcerpt?: string;
   } | null;
 }
 
@@ -44,7 +45,7 @@ export function FlashcardModal({ isOpen, onClose, nodeData }: FlashcardModalProp
               transition={{ duration: 0.6, type: "spring", stiffness: 260, damping: 20 }}
               onClick={() => setIsFlipped(!isFlipped)}
             >
-              {/* Front of card (Question) */}
+              {/* Front of card (问题) */}
               <div className="absolute inset-0 backface-hidden bg-white rounded-3xl shadow-2xl border border-slate-100 p-8 flex flex-col">
                 <div className="flex justify-between items-start mb-6">
                   <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700">
@@ -59,7 +60,7 @@ export function FlashcardModal({ isOpen, onClose, nodeData }: FlashcardModalProp
                 </div>
                 
                 <div className="flex-1 flex flex-col items-center justify-center text-center overflow-y-auto custom-scrollbar">
-                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Question</h3>
+                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">问题</h3>
                   <div className="text-xl font-medium text-slate-800 leading-relaxed text-left w-full">
                     <MarkdownRenderer content={nodeData.question} />
                   </div>
@@ -67,11 +68,11 @@ export function FlashcardModal({ isOpen, onClose, nodeData }: FlashcardModalProp
                 
                 <div className="mt-auto pt-4 flex justify-center text-slate-400 items-center gap-2 text-sm">
                   <RotateCw size={16} />
-                  <span>Click to reveal answer</span>
+                  <span>点击显示答案</span>
                 </div>
               </div>
 
-              {/* Back of card (Answer) */}
+              {/* Back of card (答案) */}
               <div 
                 className="absolute inset-0 backface-hidden bg-indigo-600 rounded-3xl shadow-2xl border border-indigo-500 p-8 flex flex-col text-white"
                 style={{ transform: "rotateY(180deg)" }}
@@ -89,15 +90,16 @@ export function FlashcardModal({ isOpen, onClose, nodeData }: FlashcardModalProp
                 </div>
                 
                 <div className="flex-1 flex flex-col items-center justify-center text-center overflow-y-auto custom-scrollbar">
-                  <h3 className="text-sm font-semibold text-indigo-300 uppercase tracking-wider mb-4">Answer</h3>
+                  <h3 className="text-sm font-semibold text-indigo-300 uppercase tracking-wider mb-4">答案</h3>
                   <div className="text-lg font-medium text-white leading-relaxed text-left w-full">
                     <MarkdownRenderer content={nodeData.answer} dark={true} />
+                    {nodeData.sourceExcerpt && <p className="mt-4 border-t border-indigo-400 pt-3 text-sm text-indigo-100">原文摘录：{nodeData.sourceExcerpt}</p>}
                   </div>
                 </div>
                 
                 <div className="mt-auto pt-4 flex justify-center text-indigo-300 items-center gap-2 text-sm">
                   <RotateCw size={16} />
-                  <span>Click to flip back</span>
+                  <span>点击返回问题</span>
                 </div>
               </div>
             </motion.div>

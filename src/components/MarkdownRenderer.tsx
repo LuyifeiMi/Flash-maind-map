@@ -1,8 +1,8 @@
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { lazy, Suspense } from 'react';
 import { cn } from '../lib/utils';
+const CodeBlock = lazy(() => import('./CodeBlock'));
 
 interface MarkdownRendererProps {
   content: string;
@@ -19,14 +19,9 @@ export function MarkdownRenderer({ content, className, dark = false }: MarkdownR
           code({ node, inline, className, children, ...props }: any) {
             const match = /language-(\w+)/.exec(className || '');
             return !inline && match ? (
-              <SyntaxHighlighter
-                {...props}
-                children={String(children).replace(/\n$/, '')}
-                style={vscDarkPlus}
-                language={match[1]}
-                PreTag="div"
-                className="rounded-md my-2 text-sm"
-              />
+              <Suspense fallback={<pre className="overflow-auto rounded bg-slate-900 p-3 text-slate-100">{children}</pre>}>
+                <CodeBlock language={match[1]}>{String(children).replace(/\n$/, '')}</CodeBlock>
+              </Suspense>
             ) : (
               <code {...props} className={cn("bg-slate-100 text-pink-600 px-1.5 py-0.5 rounded-md text-sm font-mono", dark && "bg-slate-800 text-pink-400", className)}>
                 {children}

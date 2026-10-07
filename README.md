@@ -1,78 +1,59 @@
-# 🧠 FlashMap AI
+# FlashMap 桌面版
 
-FlashMap AI is an intelligent mind mapping and flashcard application designed to help you visualize knowledge, organize thoughts, and study effectively. Powered by Google's Gemini AI, it can automatically generate expansive mind maps and detailed flashcards from simple text prompts.
+用思维导图整理知识，用闪卡主动回忆，把复习状态反馈到导图上。
 
-## ✨ Features
+## 打开应用
 
-- **🤖 AI-Powered Generation:** Generate full mind maps, expand specific subtopics, or create individual nodes instantly using the Gemini API.
-- **🗂️ Built-in Flashcards:** Every node in your mind map doubles as a flashcard (Question & Answer) for active recall studying.
-- **☁️ Cloud Sync & Authentication:** Sign in with Google to securely save and sync your maps across devices using Firebase Firestore (also supports local storage for guest users).
-- **🔒 Secure Architecture:** Built with a custom Express backend proxy to ensure your Gemini API keys remain 100% secure and hidden from the browser.
-- **🎨 Interactive Canvas:** Drag-and-drop interface powered by React Flow, featuring one-click auto-layout, minimap, and smooth animations.
-- **📚 Study & Review Modes:** Dedicated study modes to review entire trees or specific subtrees of your knowledge map.
+Windows 桌面双击 **FlashMap** 快捷方式。本机服务自动启动，优先使用 Edge 的独立应用窗口打开；已经启动时会复用服务。关闭窗口后服务继续在本机运行，Windows 退出时结束。电脑无需一直打开终端。
 
-## 🛠️ Tech Stack
+此版本是本机应用加浏览器应用窗口，尚未打包成独立安装程序。需要 Node.js 20.19+ 或 22.12+、项目目录及 node_modules。移动项目目录后需要重新创建快捷方式。
 
-- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS, React Flow (@xyflow/react), Framer Motion, Lucide Icons
-- **Backend:** Node.js, Express (bundled via ESBuild)
-- **AI Integration:** Google Gemini API (`@google/genai`)
-- **Database & Auth:** Firebase (Firestore & Google Auth)
+首次安装或更新代码：
 
-## 🚀 Getting Started
+~~~powershell
+npm ci
+npm run build
+npm run desktop:shortcut
+~~~
 
-### Prerequisites
-- Node.js (v18 or higher)
-- A Google Gemini API Key
-- A Firebase Project (for Auth and Firestore)
+通过 `npm run desktop` 打开应用，也可使用 `npm run dev` 开发。入口固定为 http://localhost:3000，保持相同浏览器与地址可继续使用已有本地数据。若端口被其他程序占用，启动器会提示而不会终止其他程序。
 
-### Installation
+## 桌面学习
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/flashmap-ai.git
-   cd flashmap-ai
-   ```
+- 导图编辑、拖动、折叠、关联线、摘要、边界、撤销重做与 JSON 导入导出。
+- 每日复习、困难卡片、主题子树复习、自评小测验、暂停和恢复卡片。
+- 四档评分和逐题保存；复习后定位回导图，查看薄弱知识点。
+- AI 生成闪卡、导图及知识点扩展，生成结果可预览、修改并筛选。
 
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+导图与复习保存在当前浏览器的本机存储，不登录、不连接 Firebase、不进行云同步。原有本地导图会保留；旧版云端备份也不会被删除。使用不同浏览器时，可通过 JSON 导出和导入迁移。清理浏览器数据会清除该浏览器中的导图，请定期导出备份。
 
-3. **Environment Variables:**
-   Create a `.env` file in the root directory and add your secure keys:
-   ```env
-   # Your Gemini API Key (Secured on the backend)
-   GEMINI_API_KEY="your_gemini_api_key_here"
-   VITE_FIREBASE_API_KEY="your_firebase_api_key"
-   VITE_FIREBASE_AUTH_DOMAIN="your_firebase_auth_domain"
-   VITE_FIREBASE_PROJECT_ID="your_project_id"
-   VITE_FIREBASE_STORAGE_BUCKET="your_storage_bucket"
-   VITE_FIREBASE_MESSAGING_SENDER_ID="your_sender_id"
-   VITE_FIREBASE_APP_ID="your_app_id"
-   VITE_FIREBASE_DATABASE_ID="your_database_id"
-   ```
-   *(Note: Make sure your Firebase configuration in `src/firebase.ts` is also set up with your own Firebase project details).*
+应用内浏览器与桌面 Edge 窗口使用不同的浏览器存储。需要直接加入桌面版的私人导图时，可运行 `npm run desktop:import -- <私人导图 JSON 的绝对路径>`，然后通过桌面快捷方式打开。通用导入器把资料暂存于当前 Windows 用户目录并使用 DPAPI 加密；桌面窗口确认本机保存成功后清理中转文件。同一浏览器的多个桌面窗口会更新导图列表。
 
-4. **Run the development server:**
-   ```bash
-   npm run dev
-   ```
-   This will start both the Express backend and the Vite frontend concurrently on `http://localhost:3000`.
+私人导入不写入应用源码或默认示例。导入只在持有一次性本机授权的窗口中进行；启动时通过临时 URL 片段交给指定窗口，页面立即清除片段，再换取短期 HttpOnly Cookie。临时授权不是 AI 密钥，不包含学习资料，不进入 HTTP 网址、引用来源或应用日志。
 
-5. **Build for Production:**
-   ```bash
-   npm run build
-   npm run start
-   ```
+## AI 密钥
 
-## 🛡️ Security Note
+首次点击 AI 生成，若没有密钥，会弹出“请输入你的 Key”。输入 Gemini API Key，保存后继续刚才的生成；取消即可继续本地学习。也可在侧栏“AI 密钥设置”中替换或移除密钥。无效或无权限的密钥会提示重新输入；连接失败提示检查网络。
 
-This project is configured as a full-stack application. The Gemini API key is securely loaded on the backend (`server.ts`) using `process.env.GEMINI_API_KEY`. The React frontend communicates with the backend via a `/api/generate` proxy route. **Your API keys are never exposed to the client-side browser.**
+默认勾选 Windows 当前账户加密保存，密文位于 `%LOCALAPPDATA%\FlashMap\ai-key.dpapi`。使用 Windows DPAPI CurrentUser 保护，重启应用后自动使用。取消勾选时只留在本机服务内存中，服务退出后失效。不会把密钥放入浏览器存储、导图、导出文件、网址、命令行、日志或前端构建；API 只返回是否已配置，不能取回密钥。
 
-## 🤝 Contributing
+不再从 .env 的 GEMINI_API_KEY 或 Firebase 配置启用 AI。已有 .env 保留不改动，如曾在里面保存密钥，可自行移除旧的明文配置。模型和请求额度仍可由 .env.example 中的本机后端设置调整。
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/yourusername/flashmap-ai/issues).
+当前账户加密防止其他普通 Windows 账户直接读取密文；不能保证对拥有你当前账户权限的程序或管理员绝对保密。请只在密钥窗口输入密钥，不要写进学习资料。
 
-## 📝 License
+编辑和复习可以离线进行；使用 AI 时，本机后端会通过 HTTPS 将密钥和当前提交的学习材料发送给 Gemini。应用没有云端账户或同步服务。服务固定监听 127.0.0.1，拒绝其他网站与不合法主机的 API 请求；不会返回提供商的原始异常。常见凭据格式及已配置密钥不能作为学习内容提交。
 
-This project is licensed under the MIT License.
+## 验证
+
+~~~powershell
+npm run lint
+npm test
+npm run build
+npm run check:privacy
+~~~
+
+测试使用虚构密钥与模拟 AI，不读取真实凭据，不产生 AI 费用。覆盖图结构、导入、复习、备份恢复、AI 数据校验、密钥提示、来源校验、错误脱敏、限流，以及 Windows 加密保存、替换与移除。真实 Gemini 连通性需由你在界面配置自己的密钥后验证。
+
+当前复习使用固定间隔调度，并非 FSRS，每卡保留最近 200 次评分。后续可以继续完善本机文件备份、独立安装包、FSRS 调度和 PDF 资料导入。
+
+技术栈：React 19、TypeScript、Vite、React Flow、Tailwind CSS、Express 和 Gemini SDK。

@@ -1,57 +1,42 @@
-import express from "express";
-import path from "path";
-import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import 'dotenv/config';
+import express from 'express';
+import path from 'node:path';
+import { createApiRouter } from './server/api';
+import { createDesktopImport } from './server/desktop-import';
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
-
-  app.use(express.json());
-
-  app.post("/api/generate", async (req, res) => {
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        return res.status(500).json({ error: "GEMINI_API_KEY is missing. Please configure it in AI Studio Secrets." });
-      }
-      const ai = new GoogleGenAI({ apiKey });
-      
-      const { prompt, schema } = req.body;
-      
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: schema,
-        }
-      });
-      
-      res.json({ text: response.text });
-    } catch (error: any) {
-      console.error("Gemini API Error:", error);
-      res.status(500).json({ error: error.message });
-    }
+  const port = Number(process.env.PORT) || 3000;
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (process.env.NODE_ENV === 'production') res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'");
+    next();
   });
-
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+  app.use((req, res, next) => ['localhost', '127.0.0.1'].includes(req.hostname) ? next() : res.sendStatus(403));
+  app.use(express.json({ limit: '100kb' }));
+  const desktopImport = createDesktopImport();
+  app.post('/desktop/open', express.urlencoded({ extended: false, limit: '1kb' }), desktopImport.open);
+  app.use('/api/desktop-import', desktopImport.router);
+  app.use('/api', createApiRouter());
+  app.use('/api', (_req, res) => res.status(404).json({ error: '接口不存在' }));
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer } = await import('vite');
+    const vite = await createServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
+    app.use((req, res, next) => /\.(cjs|map)$/i.test(req.path) ? res.sendStatus(404) : next());
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  app.use((error: { type?: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(error.type === 'entity.too.large' ? 413 : 400).json({ error: '请求格式或大小无效' });
   });
+  const server = app.listen(port, '127.0.0.1', () => {
+    console.log('FlashMap running on port ' + port);
+  });
+  server.on('error', () => { console.error('FlashMap could not start. The local port may be occupied.'); process.exitCode = 1; });
 }
-
-startServer();
+startServer().catch(() => { console.error('FlashMap failed to start. Check server configuration.'); process.exitCode = 1; });

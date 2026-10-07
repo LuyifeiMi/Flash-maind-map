@@ -4,13 +4,14 @@ import { cn } from '../lib/utils';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { useContext } from 'react';
 import { GraphContext } from '../contexts/GraphContext';
+import type { FlashNodeData } from '../types';
+import { learningStatus } from '../lib/review';
 
-export function CustomNode({ id, data, selected }: { id: string, data: any; selected: boolean }) {
+export function CustomNode({ id, data, selected }: { id: string, data: FlashNodeData; selected?: boolean }) {
   const depth = data.depth || 0;
-  const { getEdges } = useReactFlow();
-  const edges = getEdges();
-  const hasChildren = edges.some(e => e.source === id);
-  const { onToggleCollapse } = useContext(GraphContext);
+  const { onToggleCollapse, hasChildren: checkChildren } = useContext(GraphContext);
+  const hasChildren = checkChildren(id);
+  const status = learningStatus({ id, type: 'custom', position: { x: 0, y: 0 }, data });
   
   let sizeClasses = "";
   let titleClasses = "";
@@ -62,9 +63,17 @@ export function CustomNode({ id, data, selected }: { id: string, data: any; sele
       <div className={cn("text-slate-500 mt-1 overflow-hidden", textClasses)}>
         <span className="font-medium text-slate-600">Q:</span> 
         <div className="inline ml-1 align-top pointer-events-none">
-          <MarkdownRenderer content={data.question} className="!text-inherit !text-[inherit] inline [&>p]:inline [&>p]:mb-0 [&_pre]:hidden" />
+          <MarkdownRenderer content={data.question || ''} className="!text-inherit !text-[inherit] inline [&>p]:inline [&>p]:mb-0 [&_pre]:hidden" />
         </div>
       </div>
+
+      {!data.isGhost && <span className={cn('mt-2 self-start rounded-full px-2 py-0.5 text-[10px] font-medium', {
+        'bg-slate-100 text-slate-500': status.color === 'slate',
+        'bg-indigo-50 text-indigo-600': status.color === 'indigo',
+        'bg-rose-50 text-rose-600': status.color === 'rose',
+        'bg-amber-50 text-amber-700': status.color === 'amber',
+        'bg-emerald-50 text-emerald-700': status.color === 'emerald',
+      })}>{status.label}</span>}
 
       {hasChildren && (
         <button

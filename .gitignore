@@ -7,3 +7,8 @@ coverage/
 .env*
 !.env.example
 firebase-applet-config.json
+*.pem
+*.key
+service-account*.json
+*firebase-adminsdk*.json
+secrets*.json

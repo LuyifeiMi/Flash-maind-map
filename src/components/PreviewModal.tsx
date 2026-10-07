@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, CheckCircle2, Circle, Layers } from 'lucide-react';
-import { Node } from '@xyflow/react';
+import type { FlashNode as Node } from '../types';
 import { cn } from '../lib/utils';
 
 interface PreviewModalProps {
@@ -9,10 +9,11 @@ interface PreviewModalProps {
   onClose: () => void;
   pendingNodes: Node[];
   onConfirm: (selectedIds: string[]) => void;
+  onUpdateNode: (id: string, field: 'label' | 'question' | 'answer', value: string) => void;
   mode: 'new' | 'expand';
 }
 
-export function PreviewModal({ isOpen, onClose, pendingNodes, onConfirm, mode }: PreviewModalProps) {
+export function PreviewModal({ isOpen, onClose, pendingNodes, onConfirm, onUpdateNode, mode }: PreviewModalProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -20,7 +21,7 @@ export function PreviewModal({ isOpen, onClose, pendingNodes, onConfirm, mode }:
       // Select all by default when opened
       setSelectedIds(new Set(pendingNodes.map(n => n.id)));
     }
-  }, [isOpen, pendingNodes]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -59,10 +60,10 @@ export function PreviewModal({ isOpen, onClose, pendingNodes, onConfirm, mode }:
             <div className="flex justify-between items-center p-6 border-b border-slate-200 bg-white rounded-t-2xl">
               <div>
                 <h2 className="text-xl font-bold text-slate-800">
-                  {mode === 'new' ? 'Review Generated Map' : 'Review Expanded Concepts'}
+                  {mode === 'new' ? '预览生成的导图' : '预览扩展的知识点'}
                 </h2>
                 <p className="text-sm text-slate-500 mt-1">
-                  Select the flashcards you want to add to your mind map.
+                  选择要加入导图的卡片，可直接修改标题、问题和答案。
                 </p>
               </div>
               <button 
@@ -79,8 +80,8 @@ export function PreviewModal({ isOpen, onClose, pendingNodes, onConfirm, mode }:
                 {selectedIds.size} of {pendingNodes.length} selected
               </span>
               <div className="flex gap-3">
-                <button onClick={selectAll} className="text-sm text-indigo-600 hover:text-indigo-700 font-medium">Select All</button>
-                <button onClick={deselectAll} className="text-sm text-slate-500 hover:text-slate-700 font-medium">Deselect All</button>
+                <button onClick={selectAll} className="text-sm text-indigo-600 hover:text-indigo-700 font-medium">全选</button>
+                <button onClick={deselectAll} className="text-sm text-slate-500 hover:text-slate-700 font-medium">取消全选</button>
               </div>
             </div>
 
@@ -109,18 +110,19 @@ export function PreviewModal({ isOpen, onClose, pendingNodes, onConfirm, mode }:
                         <div className="p-1 bg-indigo-50 rounded text-indigo-600">
                           <Layers size={14} />
                         </div>
-                        <h3 className="font-bold text-slate-800">{node.data.label}</h3>
+                        <input aria-label="节点标题" value={node.data.label || ''} onClick={e => e.stopPropagation()} onChange={e => onUpdateNode(node.id, 'label', e.target.value)} className="w-full rounded border border-slate-200 px-2 py-1 font-bold text-slate-800" />
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
                         <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
-                          <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">Question</span>
-                          <p className="text-sm text-slate-700">{node.data.question}</p>
+                          <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">问题</span>
+                          <textarea aria-label="闪卡问题" value={node.data.question || ''} onClick={e => e.stopPropagation()} onChange={e => onUpdateNode(node.id, 'question', e.target.value)} rows={3} className="w-full rounded border border-slate-200 p-2 text-sm text-slate-700" />
                         </div>
                         <div className="bg-indigo-50/50 p-3 rounded-lg border border-indigo-100/50">
-                          <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider block mb-1">Answer</span>
-                          <p className="text-sm text-slate-700">{node.data.answer}</p>
+                          <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider block mb-1">答案</span>
+                          <textarea aria-label="闪卡答案" value={node.data.answer || ''} onClick={e => e.stopPropagation()} onChange={e => onUpdateNode(node.id, 'answer', e.target.value)} rows={3} className="w-full rounded border border-indigo-100 p-2 text-sm text-slate-700" />
                         </div>
                       </div>
+                      <p className="mt-2 text-xs text-slate-500">{node.data.sourceExcerpt ? `原文摘录：${node.data.sourceExcerpt}` : 'AI 补充内容，请核对后加入导图'}</p>
                     </div>
                   </div>
                 );
@@ -133,14 +135,14 @@ export function PreviewModal({ isOpen, onClose, pendingNodes, onConfirm, mode }:
                 onClick={onClose}
                 className="px-6 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
               >
-                Cancel
+                取消
               </button>
               <button
                 onClick={() => onConfirm(Array.from(selectedIds))}
-                disabled={selectedIds.size === 0}
+                disabled={selectedIds.size === 0 || pendingNodes.some(n => selectedIds.has(n.id) && (!n.data.label?.trim() || !n.data.question?.trim() || !n.data.answer?.trim()))}
                 className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-sm font-medium rounded-xl transition-colors shadow-sm"
               >
-                Add {selectedIds.size} Cards to Map
+                加入 {selectedIds.size} 张卡片
               </button>
             </div>
           </motion.div>

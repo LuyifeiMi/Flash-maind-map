@@ -66,6 +66,7 @@ service cloud.firestore {
              data.title is string && data.title.size() <= 100 &&
              data.nodes is string && data.nodes.size() < 1000000 && // 1MB limit check
              data.edges is string && data.edges.size() < 1000000 && // 1MB limit check
+             data.nodes.size() + data.edges.size() < 800000 &&
              isValidDateString(data.updatedAt);
     }
 
@@ -81,10 +82,12 @@ service cloud.firestore {
       match /maps/{mapId} {
         allow read: if isOwner(userId);
         allow create: if isOwner(userId) && 
+                         request.resource.data.id == mapId &&
                          isValidMapData(request.resource.data) && 
                          uidUnchanged() && 
                          request.resource.data.uid == userId;
         allow update: if isOwner(userId) && 
+                         request.resource.data.id == mapId &&
                          isDocOwner() &&
                          isValidMapData(request.resource.data) && 
                          uidNotModified() && 
